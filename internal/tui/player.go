@@ -349,16 +349,3 @@ func winSize() (cols, rows, cellW, cellH int) {
 	}
 	return cols, rows, cellW, cellH
 }
-
-// countdownBar renders the remaining time as a bar plus seconds.
-func countdownBar(remaining, total time.Duration, cols int) string {
-	width := min(20, max(cols-10, 4))
-	filled := width
-	if total > 0 {
-		filled = int(float64(remaining)/float64(total)*float64(width) + 0.5)
-	}
-	filled = max(min(filled, width), 0)
-	secs := int(math.Ceil(remaining.Seconds()))
-	return fmt.Sprintf("[%s%s] %ds",
-		strings.Repeat("#", filled), strings.Repeat("-", width-filled), secs)
-}

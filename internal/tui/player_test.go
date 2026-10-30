@@ -62,7 +62,7 @@ func TestViewAtDoneWhenSizes(t *testing.T) {
 	}{
 		{80, 24, render.ModeFull, "▀"},
 		{40, 20, render.ModeFull, "▀"},
-		{20, 6, render.ModeCompact, "AD · "},
+		{20, 6, render.ModeCompact, "Ad"},
 	}
 	for _, tt := range tests {
 		t.Run("80x24x"[0:0]+itoa(tt.cols)+"x"+itoa(tt.rows), func(t *testing.T) {
@@ -103,6 +103,68 @@ func TestViewUsesASCIIAndIndexedHalfBlockTiers(t *testing.T) {
 	view = m.View()
 	if !strings.Contains(view, ";5;") {
 		t.Errorf("limited-color half-block view lacks indexed colors")
+	}
+}
+
+func TestCountdownBarUsesHalfCellProgress(t *testing.T) {
+	got := sgrRe.ReplaceAllString(progressBar(375*time.Millisecond, time.Second, 4, false), "")
+	if got != "━╸──" {
+		t.Fatalf("countdownBar = %q, want %q", got, "━╸──")
+	}
+}
+
+func TestViewUsesClockHeaderAndShortFooter(t *testing.T) {
+	m := newTestModel(t, 40, 20)
+	m.total = 10 * time.Second
+	view := m.View()
+	if !strings.Contains(view, "Ad") || !strings.Contains(view, "0:10") {
+		t.Fatalf("view missing label or remaining time: %q", view)
+	}
+	if !strings.Contains(view, "^C ?") || !strings.Contains(view, "r report") {
+		t.Fatalf("narrow footer missing short controls: %q", view)
+	}
+}
+
+func TestCompactFooterKeepsSkipAndControlsVisible(t *testing.T) {
+	m := newTestModel(t, 20, 6)
+	m.total = 10 * time.Second
+	view := sgrRe.ReplaceAllString(m.View(), "")
+	if !strings.Contains(view, "Skip in") || !strings.Contains(view, "^C ?") || !strings.Contains(view, "r report") {
+		t.Fatalf("compact footer omitted a control: %q", view)
+	}
+}
+
+func TestASCIIViewUsesPlainProgressCharacters(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.total = 10 * time.Second
+	m.tier = render.TierASCII
+	m.start = time.Now().Add(-5 * time.Second)
+	view := sgrRe.ReplaceAllString(m.View(), "")
+	if !strings.Contains(view, "====") || !strings.Contains(view, "----") {
+		t.Fatalf("ASCII progress bar missing plain fill and remainder: %q", view)
+	}
+}
+
+func TestTallLayoutUsesWideVideoAndUpperThirdAnchor(t *testing.T) {
+	m := newTestModel(t, 90, 70)
+	m.cellW, m.cellH = 8, 16
+	lines := strippedLines(m.View())
+	firstContent := -1
+	barWidth := 0
+	for i, line := range lines {
+		if firstContent < 0 && strings.TrimSpace(line) != "" {
+			firstContent = i
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && strings.Trim(trimmed, "━╸─") == "" {
+			barWidth = len([]rune(trimmed))
+		}
+	}
+	if firstContent < 0 || firstContent >= 70/3 {
+		t.Fatalf("player begins at row %d, want upper third", firstContent)
+	}
+	if barWidth != 88 {
+		t.Fatalf("progress bar width = %d, want video width 88", barWidth)
 	}
 }
 
@@ -197,6 +259,31 @@ func TestTickAdvancesFrames(t *testing.T) {
 	}
 }
 
+func TestPlaybackAndChromeTickRates(t *testing.T) {
+	if frameInterval != 100*time.Millisecond {
+		t.Errorf("frame interval = %v, want 100ms", frameInterval)
+	}
+	if chromeInterval != time.Second/30 {
+		t.Errorf("chrome interval = %v, want %v", chromeInterval, time.Second/30)
+	}
+}
+
+func TestGraphicPayloadCacheSurvivesChromeRefresh(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.frames = []image.Image{image.NewRGBA(image.Rect(0, 0, 8, 8))}
+	m.tier = render.TierKitty
+	firstView := m.View()
+	firstPayload := m.graphicData
+	if firstPayload == "" || !strings.Contains(firstView, firstPayload) {
+		t.Fatal("first view did not encode and include the Kitty frame")
+	}
+	m.start = time.Now().Add(-20 * time.Millisecond)
+	secondView := m.View()
+	if m.graphicData != firstPayload || !strings.Contains(secondView, firstPayload) {
+		t.Error("chrome refresh changed the cached frame payload")
+	}
+}
+
 func TestKeys(t *testing.T) {
 	m := newTestModel(t, 80, 24)
 	m.rewardLines = []string{"Reward line one", "Reward line two"}
@@ -249,8 +336,8 @@ func TestSkipFooterChangesAtDelay(t *testing.T) {
 		t.Fatalf("early footer does not show skip countdown: %q", m.View())
 	}
 	m.start = time.Now().Add(-4*time.Second - time.Millisecond)
-	if !strings.Contains(m.View(), "[Enter] skip") {
-		t.Fatalf("unlocked footer does not show Enter skip: %q", m.View())
+	if !strings.Contains(m.View(), "[ Skip ▶ ]") {
+		t.Fatalf("unlocked footer does not show skip button: %q", m.View())
 	}
 }
 
@@ -258,6 +345,10 @@ func TestRewardPopupPausesAdUntilDismissed(t *testing.T) {
 	m := newTestModel(t, 80, 24)
 	m.start = time.Now().Add(-m.total - time.Second)
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	wantElapsed := m.paused.Sub(m.start)
+	if got := m.elapsedAt(m.paused.Add(5 * time.Second)); got != wantElapsed {
+		t.Fatalf("elapsed during popup = %v, want frozen value %v", got, wantElapsed)
+	}
 	_, cmd := m.Update(tickMsg(time.Now()))
 	if m.result.Finished || cmd == nil {
 		t.Fatal("the ad finished while the reward popup was open")

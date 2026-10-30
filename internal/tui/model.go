@@ -13,6 +13,9 @@ import (
 )
 
 type tickMsg time.Time
+type chromeTickMsg time.Time
+
+const chromeInterval = time.Second / 30
 
 // model drives one ad playback.
 type model struct {
@@ -37,6 +40,10 @@ type model struct {
 	reportMessage string
 	rewardIndex   int
 	result        Result
+	graphicValid  bool
+	graphicFrame  int
+	graphicTier   render.Tier
+	graphicData   string
 }
 
 type popupKind uint8
@@ -48,7 +55,10 @@ const (
 )
 
 func (m *model) Init() tea.Cmd {
-	return tea.Tick(frameInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return tea.Batch(
+		tea.Tick(frameInterval, func(t time.Time) tea.Msg { return tickMsg(t) }),
+		tea.Tick(chromeInterval, func(t time.Time) tea.Msg { return chromeTickMsg(t) }),
+	)
 }
 
 // resize recomputes the layout tier for the current terminal size. Once the
@@ -69,7 +79,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.message != "" && time.Now().After(m.messageUntil) {
 			m.message = ""
 		}
-		elapsed := time.Since(m.start)
+		elapsed := m.elapsedAt(time.Now())
 		if elapsed >= m.total {
 			m.result.Finished = true
 			m.result.Duration = m.total
@@ -81,6 +91,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.frameIx = ix
 		return m, tea.Tick(frameInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+
+	case chromeTickMsg:
+		return m, tea.Tick(chromeInterval, func(t time.Time) tea.Msg { return chromeTickMsg(t) })
 
 	case tea.WindowSizeMsg:
 		m.cols, m.rows = msg.Width, msg.Height
@@ -104,7 +117,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.result.Suspended = true
 			return m, tea.Quit
 		case "enter":
-			if time.Since(m.start) >= skipAfter(m.total) {
+			if m.elapsedAt(time.Now()) >= skipAfter(m.total) {
 				m.result.Finished = true
 				m.result.Duration = time.Since(m.start)
 				return m, tea.Quit
@@ -131,6 +144,7 @@ func (m *model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 			m.start = m.start.Add(time.Since(m.paused))
+			m.paused = time.Time{}
 			m.popup = popupNone
 			m.message = ""
 		}
@@ -138,11 +152,23 @@ func (m *model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if msg.String() == "enter" {
 		m.start = time.Now()
+		m.paused = time.Time{}
 		m.frameIx = 0
 		m.popup = popupNone
 		m.message = ""
 	}
 	return m, nil
+}
+
+func (m *model) elapsedAt(now time.Time) time.Duration {
+	if m.popup != popupNone && !m.paused.IsZero() {
+		now = m.paused
+	}
+	elapsed := now.Sub(m.start)
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
 }
 
 func skipAfter(total time.Duration) time.Duration {
@@ -160,33 +186,35 @@ func (m *model) View() string {
 	if m.cols < 1 || m.rows < 1 {
 		return ""
 	}
-	remaining := m.total - time.Since(m.start)
+	elapsed := m.elapsedAt(time.Now())
+	remaining := m.total - elapsed
 	if remaining < 0 {
 		remaining = 0
 	}
-	secs := int(math.Ceil(remaining.Seconds()))
-	bar := render.Truncate(countdownBar(remaining, m.total, m.cols), m.cols)
-
 	var content string
 	var graphicPayload, graphicPlaceholder string
 	if m.mode == render.ModeCompact {
-		line := fmt.Sprintf("AD · %s · %ds · Skip: Enter", m.title, secs)
-		if time.Since(m.start) < skipAfter(m.total) {
-			line = fmt.Sprintf("AD · %s · %ds · Skip in %d", m.title, secs,
-				int(math.Ceil((skipAfter(m.total) - time.Since(m.start)).Seconds())))
+		width := max(min(m.cols-2, 100), 1)
+		footer := footerLine(m, elapsed, width)
+		if m.message != "" {
+			footer = render.Truncate(m.message, width)
 		}
-		content = render.Truncate(line, m.cols) + "\n" + bar
+		content = strings.Join([]string{
+			headerLine(width, remaining),
+			progressBar(elapsed, m.total, width, m.tier == render.TierASCII),
+			footer,
+		}, "\n")
 	} else {
 		b := m.frames[m.frameIx].Bounds()
-		boxCols, boxRows := render.Fit(b.Dx(), b.Dy(),
-			m.cols, max(m.rows-3, 1), m.cellW, m.cellH)
+		availableCols := max(min(m.cols-2, 100), 1)
+		boxCols, boxRows := render.Fit(b.Dx(), b.Dy(), availableCols,
+			max(m.rows-3, 1), m.cellW, m.cellH)
 		var img string
 		switch m.tier {
 		case render.TierKitty, render.TierSixel, render.TierITerm2:
 			graphicPlaceholder = cellPlaceholder(boxCols, boxRows)
-			var encoded strings.Builder
-			if err := render.EncodeImage(&encoded, m.tier, m.frames[m.frameIx]); err == nil {
-				graphicPayload = encoded.String()
+			if payload, err := m.encodeGraphicFrame(); err == nil {
+				graphicPayload = payload
 				img = graphicPlaceholder
 			} else {
 				img = render.HalfBlock(m.frames[m.frameIx], boxCols, boxRows)
@@ -202,24 +230,27 @@ func (m *model) View() string {
 		default:
 			img = render.HalfBlock(m.frames[m.frameIx], boxCols, boxRows)
 		}
-		controlsText := "[Enter] skip · [Ctrl+C] reward · [r] report"
-		if time.Since(m.start) < skipAfter(m.total) {
-			wait := int(math.Ceil((skipAfter(m.total) - time.Since(m.start)).Seconds()))
-			controlsText = fmt.Sprintf("[Enter] Skip in %ds · [Ctrl+C] reward · [r] report", wait)
-		}
 		if m.message != "" {
-			controlsText = m.message
+			content = strings.Join([]string{
+				headerLine(boxCols, remaining), img,
+				progressBar(elapsed, m.total, boxCols, m.tier == render.TierASCII),
+				render.Truncate(m.message, boxCols),
+			}, "\n")
+		} else {
+			content = strings.Join([]string{
+				headerLine(boxCols, remaining), img,
+				progressBar(elapsed, m.total, boxCols, m.tier == render.TierASCII),
+				footerLine(m, elapsed, boxCols),
+			}, "\n")
 		}
-		controls := render.Truncate(controlsText, m.cols)
-		content = img + "\n" + bar + "\n" + controls
-	}
-	if m.message != "" && m.mode == render.ModeCompact {
-		content += "\n" + render.Truncate(m.message, m.cols)
 	}
 	if m.popup != popupNone {
 		return m.clearGraphic() + m.popupView()
 	}
-	view := lipgloss.Place(m.cols, m.rows, lipgloss.Center, lipgloss.Center, content)
+	contentHeight := lipgloss.Height(content)
+	top := max(m.rows/3-contentHeight/2, 0)
+	view := lipgloss.Place(m.cols, m.rows, lipgloss.Center, lipgloss.Top,
+		strings.Repeat("\n", top)+content)
 	if graphicPayload != "" {
 		placeholderRow := strings.SplitN(graphicPlaceholder, "\n", 2)[0]
 		view = strings.Replace(view, placeholderRow,
@@ -228,6 +259,92 @@ func (m *model) View() string {
 		view = m.clearKitty() + view
 	}
 	return view
+}
+
+func headerLine(width int, remaining time.Duration) string {
+	label, timer := "Ad", formatTime(remaining)
+	spaces := max(width-lipgloss.Width(label)-lipgloss.Width(timer), 1)
+	return render.Truncate(label+strings.Repeat(" ", spaces)+timer, width)
+}
+
+func formatTime(remaining time.Duration) string {
+	seconds := int(math.Ceil(max(remaining, 0).Seconds()))
+	return fmt.Sprintf("%d:%02d", seconds/60, seconds%60)
+}
+
+func progressBar(elapsed, total time.Duration, width int, ascii bool) string {
+	if width < 1 {
+		return ""
+	}
+	progress := 0.0
+	if total > 0 {
+		progress = min(max(float64(elapsed)/float64(total), 0), 1)
+	}
+	if ascii {
+		filled := int(math.Floor(progress*float64(width) + 0.5))
+		return strings.Repeat("=", filled) + strings.Repeat("-", width-filled)
+	}
+	halfCells := int(math.Floor(progress * float64(width*2)))
+	full := halfCells / 2
+	half := halfCells%2 == 1
+	if half && full == width {
+		half = false
+	}
+	empty := width - full
+	if half {
+		empty--
+	}
+	filledText := strings.Repeat("━", full)
+	if half {
+		filledText += "╸"
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB000")).Render(filledText) +
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#626262")).Faint(true).Render(strings.Repeat("─", empty))
+}
+
+func footerLine(m *model, elapsed time.Duration, width int) string {
+	var skip string
+	if elapsed < skipAfter(m.total) {
+		wait := int(math.Ceil((skipAfter(m.total) - elapsed).Seconds()))
+		skip = fmt.Sprintf("Skip in %ds", wait)
+	} else {
+		skip = "[ Skip ▶ ]"
+	}
+	if width < 30 {
+		if elapsed < skipAfter(m.total) {
+			skip = lipgloss.NewStyle().Faint(true).Render(skip)
+		} else {
+			skip = lipgloss.NewStyle().Reverse(true).Bold(true).Render(skip)
+		}
+		return skip + "\n" + render.Truncate("^C ?   r report", width)
+	}
+	separator, controls := " · ", "[Ctrl+C] ??? · [r] report"
+	if m.cols < 50 {
+		separator, controls = "   ", "^C ?   r report"
+	}
+	skipWidth := max(width-lipgloss.Width(separator)-lipgloss.Width(controls), 0)
+	skip = render.Truncate(skip, skipWidth)
+	if elapsed < skipAfter(m.total) {
+		skip = lipgloss.NewStyle().Faint(true).Render(skip)
+	} else {
+		skip = lipgloss.NewStyle().Reverse(true).Bold(true).Render(skip)
+	}
+	return skip + separator + controls
+}
+
+func (m *model) encodeGraphicFrame() (string, error) {
+	if m.graphicValid && m.graphicFrame == m.frameIx && m.graphicTier == m.tier {
+		return m.graphicData, nil
+	}
+	var encoded strings.Builder
+	if err := render.EncodeImage(&encoded, m.tier, m.frames[m.frameIx]); err != nil {
+		return "", err
+	}
+	m.graphicValid = true
+	m.graphicFrame = m.frameIx
+	m.graphicTier = m.tier
+	m.graphicData = encoded.String()
+	return m.graphicData, nil
 }
 
 func cellPlaceholder(cols, rows int) string {
