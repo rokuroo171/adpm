@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,5 +144,46 @@ func TestNoArgsUsage(t *testing.T) {
 	}
 	if code := run(nil); code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
+	}
+}
+
+func TestCancelInstallReturns130AndPrintsManagerMessage(t *testing.T) {
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	code := cancelInstall("apt")
+	os.Stderr = old
+	_ = w.Close()
+	output, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 130 {
+		t.Errorf("cancelInstall returned %d, want 130", code)
+	}
+	if got := string(output); !strings.Contains(got, "E: Operation aborted.") {
+		t.Errorf("cancel message = %q", got)
+	}
+}
+
+func TestEmbeddedMessagesProvideControlsAndAbortText(t *testing.T) {
+	messages, err := loadMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pacman", "yay", "paru", "apt", "dnf", "brew", "flatpak"} {
+		if messages["abort"][name] == "" {
+			t.Errorf("embedded messages are missing abort text for %s", name)
+		}
+	}
+	if got := messageLines(messages["reward"]); len(got) != 3 || got[0] == got[1] {
+		t.Fatalf("reward messages = %q, want three ordered lines", got)
+	}
+	if messages["report"]["message"] == "" {
+		t.Fatal("embedded messages are missing the report reply")
 	}
 }

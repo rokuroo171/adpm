@@ -1,0 +1,16 @@
+[abort]
+pacman = "error: failed to commit transaction (user lost interest)"
+yay = "error: failed to commit transaction (user lost interest)"
+paru = "error: failed to commit transaction (user lost interest)"
+apt = "E: Operation aborted. Your sponsor has been notified."
+dnf = "Error: transaction cancelled. The ad was the last straw."
+brew = "Error: installation cancelled. Your sponsor has been notified."
+flatpak = "error: installation cancelled. Your sponsor has been notified."
+
+[reward]
+line1 = "You won't get your reward if you skip this ad."
+line2 = "The sponsor noticed you reaching for Ctrl+C."
+line3 = "Your reward is still waiting. Probably."
+
+[report]
+message = "Thank you. Your report will be reviewed in 3-5 business years."

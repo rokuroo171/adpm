@@ -3,9 +3,11 @@
 package tui
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"image"
+	"io"
 	"math"
 	"os"
 	"os/signal"
@@ -24,8 +26,10 @@ const frameInterval = 100 * time.Millisecond
 
 // Options describe the ad to play.
 type Options struct {
-	Frames []image.Image
-	Title  string
+	Frames        []image.Image
+	Title         string
+	RewardLines   []string
+	ReportMessage string
 }
 
 // Result reports how the ad ended.
@@ -91,21 +95,23 @@ func play(opts Options) (Result, error) {
 	cols, rows, cellW, cellH := winSize()
 
 	if render.ModeFor(cols, rows) == render.ModeOneLine {
-		return playOneLine(opts.Title, cols, total)
+		return playOneLine(opts, cols, total)
 	}
 	return playTUI(opts, total, cols, rows, cellW, cellH)
 }
 
 func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int) (Result, error) {
 	m := &model{
-		frames: opts.Frames,
-		title:  opts.Title,
-		total:  total,
-		start:  time.Now(),
-		cols:   cols,
-		rows:   rows,
-		cellW:  cellW,
-		cellH:  cellH,
+		frames:        opts.Frames,
+		title:         opts.Title,
+		rewardLines:   opts.RewardLines,
+		reportMessage: opts.ReportMessage,
+		total:         total,
+		start:         time.Now(),
+		cols:          cols,
+		rows:          rows,
+		cellW:         cellW,
+		cellH:         cellH,
 	}
 	m.resize()
 
@@ -130,34 +136,132 @@ func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int) (R
 
 // playOneLine handles terminals under ~20x6: one plain line plus countdown,
 // no alt screen and no Bubble Tea.
-func playOneLine(title string, cols int, total time.Duration) (Result, error) {
-	var res Result
-	start := time.Now()
+func playOneLine(opts Options, cols int, total time.Duration) (Result, error) {
+	m := &model{
+		title: opts.Title, total: total, start: time.Now(),
+		rewardLines: opts.RewardLines, reportMessage: opts.ReportMessage,
+	}
+	keys, restoreInput := lineInput()
+	defer restoreInput()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
+	ticker := time.NewTicker(frameInterval)
+	defer ticker.Stop()
 
 	for {
-		remaining := total - time.Since(start)
-		if remaining <= 0 {
-			break
+		now := time.Now()
+		if m.popup == popupNone && now.Sub(m.start) >= total {
+			fmt.Fprintln(os.Stdout)
+			return Result{Finished: true, Duration: total}, nil
 		}
-		secs := int(math.Ceil(remaining.Seconds()))
-		line := render.Truncate(fmt.Sprintf("AD · %s · %ds left", title, secs), cols)
+		if m.popup == popupNone && m.message != "" && now.After(m.messageUntil) {
+			m.message = ""
+		}
+		line := oneLineView(m, cols, now)
 		fmt.Fprintf(os.Stdout, "\r\x1b[2K%s", line)
 		select {
-		case <-sigCh:
-			fmt.Fprintln(os.Stdout)
-			res.Cancelled = true
-			return res, nil
-		case <-time.After(frameInterval):
+		case sig := <-sigCh:
+			if sig == syscall.SIGINT {
+				m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+			} else {
+				fmt.Fprintln(os.Stdout)
+				return Result{}, nil
+			}
+		case key, ok := <-keys:
+			if !ok {
+				keys = nil
+				continue
+			}
+			m.Update(key)
+			if m.result.Cancelled || m.result.Finished || m.result.Suspended {
+				fmt.Fprintln(os.Stdout)
+				return m.result, nil
+			}
+		case <-ticker.C:
 		}
 	}
-	fmt.Fprintln(os.Stdout)
-	res.Finished = true
-	res.Duration = total
-	return res, nil
+}
+
+func oneLineView(m *model, cols int, now time.Time) string {
+	if m.popup == popupReward {
+		line := "You won't get your reward. Enter: Cancel, Tab: OK"
+		if len(m.rewardLines) > 0 {
+			line = m.rewardLines[(m.rewardIndex-1)%len(m.rewardLines)] + " Enter: Cancel, Tab: OK"
+		}
+		if m.choice == 1 {
+			line = strings.Replace(line, "Enter: Cancel, Tab: OK", "Tab: Cancel, Enter: OK", 1)
+		}
+		return render.Truncate(line, cols)
+	}
+	if m.popup == popupReport {
+		message := m.reportMessage
+		if message == "" {
+			message = "Thank you. Your report will be reviewed in 3-5 business years."
+		}
+		return render.Truncate(message+" Enter: restart", cols)
+	}
+	remaining := m.total - now.Sub(m.start)
+	secs := int(math.Ceil(remaining.Seconds()))
+	line := fmt.Sprintf("AD · %s · %ds · Skip: Enter", m.title, secs)
+	if now.Sub(m.start) < skipAfter(m.total) {
+		wait := int(math.Ceil((skipAfter(m.total) - now.Sub(m.start)).Seconds()))
+		line = fmt.Sprintf("AD · %s · %ds · Skip in %d", m.title, secs, wait)
+	}
+	if m.message != "" {
+		line = m.message
+	}
+	return render.Truncate(line, cols)
+}
+
+func lineInput() (<-chan tea.KeyMsg, func()) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return nil, func() {}
+	}
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, func() {}
+	}
+	keys := make(chan tea.KeyMsg, 8)
+	go func() {
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			b, err := reader.ReadByte()
+			if err != nil {
+				close(keys)
+				return
+			}
+			var key tea.KeyMsg
+			switch b {
+			case 3:
+				key = tea.KeyMsg{Type: tea.KeyCtrlC}
+			case 26:
+				key = tea.KeyMsg{Type: tea.KeyCtrlZ}
+			case '\r', '\n':
+				key = tea.KeyMsg{Type: tea.KeyEnter}
+			case '\t':
+				key = tea.KeyMsg{Type: tea.KeyTab}
+			case 'r':
+				key = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}}
+			case 27:
+				sequence := make([]byte, 2)
+				if _, err := io.ReadFull(reader, sequence); err != nil || sequence[0] != '[' {
+					continue
+				}
+				if sequence[1] == 'D' {
+					key = tea.KeyMsg{Type: tea.KeyLeft}
+				} else if sequence[1] == 'C' {
+					key = tea.KeyMsg{Type: tea.KeyRight}
+				}
+			default:
+				continue
+			}
+			keys <- key
+		}
+	}()
+	return keys, func() { _ = term.Restore(fd, state) }
 }
 
 // winSize reads the terminal geometry. Cell pixel size falls back to 1:2

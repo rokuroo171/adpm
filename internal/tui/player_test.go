@@ -145,29 +145,138 @@ func TestTickAdvancesFrames(t *testing.T) {
 }
 
 func TestKeys(t *testing.T) {
-	tests := []struct {
-		name       string
-		key        tea.KeyType
-		wantCancel bool
-		wantSuspen bool
-	}{
-		{"ctrl+c ends the ad early", tea.KeyCtrlC, true, false},
-		{"ctrl+z suspends", tea.KeyCtrlZ, false, true},
-		{"enter does nothing yet", tea.KeyEnter, false, false},
+	m := newTestModel(t, 80, 24)
+	m.rewardLines = []string{"Reward line one", "Reward line two"}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if m.result.Cancelled {
+		t.Fatal("Ctrl+C cancelled before the popup was confirmed")
 	}
-	for _, tt := range tests {
+	if !strings.Contains(m.View(), "Reward line one") {
+		t.Fatalf("Ctrl+C did not show the reward popup: %q", m.View())
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.result.Cancelled {
+		t.Error("Enter on the default Cancel button did not cancel")
+	}
+
+	m = newTestModel(t, 80, 24)
+	m.rewardLines = []string{"Reward line one", "Reward line two"}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.result.Cancelled {
+		t.Error("choosing OK cancelled the install")
+	}
+	if strings.Contains(m.View(), "You won't get your reward") {
+		t.Errorf("choosing OK left the popup open")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if !strings.Contains(m.View(), "Reward line two") {
+		t.Errorf("reward popup did not rotate its message: %q", m.View())
+	}
+
+	m = newTestModel(t, 80, 24)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if !strings.Contains(m.View(), "Thank you. Your report will be reviewed") {
+		t.Fatalf("r did not show the report popup: %q", m.View())
+	}
+	oldStart := m.start
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.start.After(oldStart) {
+		t.Error("dismissing the report did not restart the ad")
+	}
+}
+
+func TestSkipFooterChangesAtDelay(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.total = 10 * time.Second
+	if !strings.Contains(m.View(), "Skip in") {
+		t.Fatalf("early footer does not show skip countdown: %q", m.View())
+	}
+	m.start = time.Now().Add(-4*time.Second - time.Millisecond)
+	if !strings.Contains(m.View(), "[Enter] skip") {
+		t.Fatalf("unlocked footer does not show Enter skip: %q", m.View())
+	}
+}
+
+func TestRewardPopupPausesAdUntilDismissed(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.start = time.Now().Add(-m.total - time.Second)
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(tickMsg(time.Now()))
+	if m.result.Finished || cmd == nil {
+		t.Fatal("the ad finished while the reward popup was open")
+	}
+}
+
+func TestCtrlZStillSuspends(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if !m.result.Suspended || cmd == nil {
+		t.Fatal("Ctrl+Z did not suspend the player")
+	}
+}
+
+func TestRewardPopupFitsCompactTerminals(t *testing.T) {
+	for _, size := range [][2]int{{40, 20}, {20, 6}} {
+		m := newTestModel(t, size[0], size[1])
+		m.rewardLines = []string{"You won't get your reward if you skip this ad."}
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		lines := strippedLines(m.View())
+		if len(lines) > size[1] {
+			t.Errorf("%dx%d popup has %d lines", size[0], size[1], len(lines))
+		}
+		for i, line := range lines {
+			if width := len([]rune(line)); width > size[0] {
+				t.Errorf("%dx%d line %d has width %d: %q", size[0], size[1], i, width, line)
+			}
+		}
+	}
+}
+
+func TestOneLineControlsStayVisibleWithinTerminalWidth(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.total = 10 * time.Second
+	line := oneLineView(m, 18, time.Now())
+	if len([]rune(line)) > 18 || line == "" {
+		t.Errorf("one-line countdown = %q", line)
+	}
+	m.rewardLines = []string{"Reward"}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	line = oneLineView(m, 18, time.Now())
+	if len([]rune(line)) > 18 || line == "" {
+		t.Errorf("one-line reward popup = %q", line)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	line = oneLineView(m, 18, time.Now())
+	if len([]rune(line)) > 18 || line == "" {
+		t.Errorf("one-line OK choice = %q", line)
+	}
+}
+
+func TestEnterRestartsBeforeSkipDelayAndFinishesAfter(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		total      time.Duration
+		wait       time.Duration
+		wantFinish bool
+	}{
+		{"3 second ad waits 2 seconds", 3 * time.Second, 1500 * time.Millisecond, false},
+		{"10 second ad waits 4 seconds", 10 * time.Second, 3 * time.Second, false},
+		{"20 second ad waits 5 seconds", 20 * time.Second, 5 * time.Second, true},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newTestModel(t, 80, 24)
-			_, cmd := m.Update(tea.KeyMsg{Type: tt.key})
-			if m.result.Cancelled != tt.wantCancel {
-				t.Errorf("Cancelled = %v, want %v", m.result.Cancelled, tt.wantCancel)
+			m.total = tt.total
+			m.start = time.Now().Add(-tt.wait)
+			_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			if m.result.Finished != tt.wantFinish {
+				t.Errorf("Finished = %v, want %v", m.result.Finished, tt.wantFinish)
 			}
-			if m.result.Suspended != tt.wantSuspen {
-				t.Errorf("Suspended = %v, want %v", m.result.Suspended, tt.wantSuspen)
-			}
-			wantCmd := tt.key != tea.KeyEnter
-			if (cmd != nil) != wantCmd {
-				t.Errorf("cmd present = %v, want %v", cmd != nil, wantCmd)
+			if !tt.wantFinish && !m.start.After(time.Now().Add(-time.Second)) {
+				t.Error("early Enter did not restart the ad")
 			}
 		})
 	}
@@ -198,7 +307,7 @@ func TestForcedPanicRestoresTerminal(t *testing.T) {
 // finished.
 func TestPlayOneLine(t *testing.T) {
 	out := captureStdout(t, func() {
-		res, err := playOneLine("Synergy™", 40, 300*time.Millisecond)
+		res, err := playOneLine(Options{Title: "Synergy™"}, 40, 300*time.Millisecond)
 		if err != nil {
 			t.Fatalf("playOneLine: %v", err)
 		}
