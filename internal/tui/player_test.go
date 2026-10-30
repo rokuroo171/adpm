@@ -28,10 +28,12 @@ func testFrames(n int) []image.Image {
 func newTestModel(t *testing.T, cols, rows int) *model {
 	t.Helper()
 	m := &model{
-		frames: testFrames(10),
-		title:  "Synergy™",
-		total:  10 * frameInterval,
-		start:  time.Now(),
+		frames:    testFrames(10),
+		title:     "Synergy™",
+		total:     10 * frameInterval,
+		start:     time.Now(),
+		tier:      render.TierHalfBlock,
+		trueColor: true,
 	}
 	if _, cmd := m.Update(tea.WindowSizeMsg{Width: cols, Height: rows}); cmd != nil {
 		t.Fatalf("WindowSizeMsg should not return a command")
@@ -85,6 +87,57 @@ func TestViewAtDoneWhenSizes(t *testing.T) {
 				t.Errorf("view missing %q for tier %v", tt.wantMarker, tt.wantTier)
 			}
 		})
+	}
+}
+
+func TestViewUsesASCIIAndIndexedHalfBlockTiers(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.tier = render.TierASCII
+	view := m.View()
+	if strings.Contains(view, "▀") || sgrRe.MatchString(view) {
+		t.Errorf("ASCII tier contains image glyphs or color escapes")
+	}
+
+	m.tier = render.TierHalfBlock
+	m.trueColor = false
+	view = m.View()
+	if !strings.Contains(view, ";5;") {
+		t.Errorf("limited-color half-block view lacks indexed colors")
+	}
+}
+
+func TestViewUsesDetectedGraphicProtocol(t *testing.T) {
+	for _, tt := range []struct {
+		tier   render.Tier
+		marker string
+	}{
+		{render.TierKitty, "\x1b_Ga=T,"},
+		{render.TierSixel, "\x1bP"},
+		{render.TierITerm2, "\x1b]1337;File=inline=1:"},
+	} {
+		t.Run(tt.marker, func(t *testing.T) {
+			m := newTestModel(t, 80, 24)
+			m.frames = []image.Image{image.NewRGBA(image.Rect(0, 0, 8, 8))}
+			m.tier = tt.tier
+			view := m.View()
+			if !strings.Contains(view, tt.marker) || !strings.Contains(view, "\u2800") {
+				t.Errorf("graphic view: protocol=%v placeholders=%v prefix=%q",
+					strings.Contains(view, tt.marker), strings.Contains(view, "\u2800"), view[:min(len(view), 100)])
+			}
+		})
+	}
+}
+
+func TestRewardPopupClearsKittyImages(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.tier = render.TierKitty
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	view := m.View()
+	if !strings.Contains(view, "\x1b_Ga=d,d=A\x1b\\") {
+		t.Error("reward popup did not clear Kitty images")
+	}
+	if strings.Contains(view, "\x1b_Ga=T,") {
+		t.Error("reward popup redraw contains a Kitty image")
 	}
 }
 
@@ -300,6 +353,9 @@ func TestForcedPanicRestoresTerminal(t *testing.T) {
 	}
 	if !strings.Contains(out, "\x1b[?25h") {
 		t.Errorf("output missing show-cursor sequence: %q", out)
+	}
+	if !strings.Contains(out, "\x1b_Ga=d,d=A\x1b\\") {
+		t.Error("cleanup did not delete Kitty images")
 	}
 }
 

@@ -24,6 +24,8 @@ type model struct {
 	rows          int
 	cellW         int
 	cellH         int
+	tier          render.Tier
+	trueColor     bool
 	mode          render.Mode
 	frameIx       int
 	popup         popupKind
@@ -166,6 +168,7 @@ func (m *model) View() string {
 	bar := render.Truncate(countdownBar(remaining, m.total, m.cols), m.cols)
 
 	var content string
+	var graphicPayload, graphicPlaceholder string
 	if m.mode == render.ModeCompact {
 		line := fmt.Sprintf("AD · %s · %ds · Skip: Enter", m.title, secs)
 		if time.Since(m.start) < skipAfter(m.total) {
@@ -177,7 +180,28 @@ func (m *model) View() string {
 		b := m.frames[m.frameIx].Bounds()
 		boxCols, boxRows := render.Fit(b.Dx(), b.Dy(),
 			m.cols, max(m.rows-3, 1), m.cellW, m.cellH)
-		img := render.HalfBlock(m.frames[m.frameIx], boxCols, boxRows)
+		var img string
+		switch m.tier {
+		case render.TierKitty, render.TierSixel, render.TierITerm2:
+			graphicPlaceholder = cellPlaceholder(boxCols, boxRows)
+			var encoded strings.Builder
+			if err := render.EncodeImage(&encoded, m.tier, m.frames[m.frameIx]); err == nil {
+				graphicPayload = encoded.String()
+				img = graphicPlaceholder
+			} else {
+				img = render.HalfBlock(m.frames[m.frameIx], boxCols, boxRows)
+			}
+		case render.TierASCII:
+			img = render.ASCII(m.frames[m.frameIx], boxCols, boxRows)
+		case render.TierHalfBlock:
+			if m.trueColor {
+				img = render.HalfBlock(m.frames[m.frameIx], boxCols, boxRows)
+			} else {
+				img = render.HalfBlock256(m.frames[m.frameIx], boxCols, boxRows)
+			}
+		default:
+			img = render.HalfBlock(m.frames[m.frameIx], boxCols, boxRows)
+		}
 		controlsText := "[Enter] skip · [Ctrl+C] reward · [r] report"
 		if time.Since(m.start) < skipAfter(m.total) {
 			wait := int(math.Ceil((skipAfter(m.total) - time.Since(m.start)).Seconds()))
@@ -193,9 +217,43 @@ func (m *model) View() string {
 		content += "\n" + render.Truncate(m.message, m.cols)
 	}
 	if m.popup != popupNone {
-		return m.popupView()
+		return m.clearGraphic() + m.popupView()
 	}
-	return lipgloss.Place(m.cols, m.rows, lipgloss.Center, lipgloss.Center, content)
+	view := lipgloss.Place(m.cols, m.rows, lipgloss.Center, lipgloss.Center, content)
+	if graphicPayload != "" {
+		placeholderRow := strings.SplitN(graphicPlaceholder, "\n", 2)[0]
+		view = strings.Replace(view, placeholderRow,
+			m.clearKitty()+graphicPayload+placeholderRow, 1)
+	} else if m.tier == render.TierKitty && m.mode == render.ModeCompact {
+		view = m.clearKitty() + view
+	}
+	return view
+}
+
+func cellPlaceholder(cols, rows int) string {
+	line := strings.Repeat("\u2800", cols)
+	lines := make([]string, rows)
+	for i := range lines {
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *model) clearKitty() string {
+	if m.tier == render.TierKitty {
+		return "\x1b_Ga=d,d=A\x1b\\"
+	}
+	return ""
+}
+
+func (m *model) clearGraphic() string {
+	if m.tier == render.TierKitty {
+		return m.clearKitty()
+	}
+	if m.tier == render.TierSixel || m.tier == render.TierITerm2 {
+		return "\x1b[2J\x1b[H"
+	}
+	return ""
 }
 
 func (m *model) popupView() string {

@@ -70,7 +70,7 @@ func withCleanup(fn func() (Result, error)) (res Result, err error) {
 		}
 		restored = true
 		// Leave the alt screen and show the cursor no matter what happened.
-		fmt.Fprint(os.Stdout, "\x1b[?1049l\x1b[?25h")
+		fmt.Fprint(os.Stdout, "\x1b_Ga=d,d=A\x1b\\\x1b[?1049l\x1b[?25h")
 		if state != nil {
 			_ = term.Restore(fd, state)
 		}
@@ -97,10 +97,11 @@ func play(opts Options) (Result, error) {
 	if render.ModeFor(cols, rows) == render.ModeOneLine {
 		return playOneLine(opts, cols, total)
 	}
-	return playTUI(opts, total, cols, rows, cellW, cellH)
+	tier, trueColor := detectTier()
+	return playTUI(opts, total, cols, rows, cellW, cellH, tier, trueColor)
 }
 
-func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int) (Result, error) {
+func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int, tier render.Tier, trueColor bool) (Result, error) {
 	m := &model{
 		frames:        opts.Frames,
 		title:         opts.Title,
@@ -112,6 +113,8 @@ func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int) (R
 		rows:          rows,
 		cellW:         cellW,
 		cellH:         cellH,
+		tier:          tier,
+		trueColor:     trueColor,
 	}
 	m.resize()
 
@@ -132,6 +135,72 @@ func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int) (R
 		return m.result, fmt.Errorf("adpm: player: %w", err)
 	}
 	return m.result, nil
+}
+
+func detectTier() (render.Tier, bool) {
+	_, noColor := os.LookupEnv("NO_COLOR")
+	caps := render.Capabilities{
+		TermProgram: os.Getenv("TERM_PROGRAM"),
+		Term:        os.Getenv("TERM"),
+		ColorTerm:   os.Getenv("COLORTERM"),
+		NoColor:     noColor,
+		NoImages:    os.Getenv("ADPM_NO_IMAGES") == "1",
+	}
+	trueColor := strings.EqualFold(caps.ColorTerm, "truecolor") || strings.EqualFold(caps.ColorTerm, "24bit")
+	if caps.NoImages || caps.NoColor || caps.Term == "linux" || caps.Term == "dumb" {
+		return render.SelectTier(caps), trueColor
+	}
+	if termProgramIsITerm(caps.TermProgram) {
+		caps.TermProgram = "iTerm.app"
+	}
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		caps.KittyReply, caps.DA1 = terminalReplies(int(os.Stdin.Fd()), os.Stdout)
+	}
+	return render.SelectTier(caps), trueColor
+}
+
+func termProgramIsITerm(program string) bool {
+	return strings.EqualFold(program, "iTerm.app") ||
+		strings.EqualFold(program, "iTerm2") ||
+		strings.EqualFold(program, "WezTerm")
+}
+
+func terminalReplies(fd int, output io.Writer) (bool, string) {
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return false, ""
+	}
+	defer term.Restore(fd, state)
+	if _, err := io.WriteString(output, "\x1b_Gi=31,s=1,v=1,a=q,t=d;AAAA\x1b\\\x1b[c"); err != nil {
+		return false, ""
+	}
+
+	deadline := time.Now().Add(150 * time.Millisecond)
+	var response strings.Builder
+	kitty, da1 := false, ""
+	buf := make([]byte, 512)
+	for time.Now().Before(deadline) && response.Len() < 4096 {
+		remaining := time.Until(deadline)
+		wait := int(remaining.Milliseconds())
+		if wait < 1 {
+			wait = 1
+		}
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		ready, err := unix.Poll(fds, wait)
+		if err != nil || ready == 0 {
+			break
+		}
+		n, err := unix.Read(fd, buf)
+		if err != nil || n == 0 {
+			break
+		}
+		response.Write(buf[:n])
+		kitty, da1 = render.ParseReplies(response.String())
+		if kitty {
+			break
+		}
+	}
+	return kitty, da1
 }
 
 // playOneLine handles terminals under ~20x6: one plain line plus countdown,

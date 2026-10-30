@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"strings"
 )
 
@@ -10,6 +11,14 @@ import (
 // upper half block glyph: each cell's foreground is the top half, its
 // background the bottom half, giving two vertical pixels per row of cells.
 func HalfBlock(frame image.Image, cols, rows int) string {
+	return halfBlock(frame, cols, rows, false)
+}
+
+func HalfBlock256(frame image.Image, cols, rows int) string {
+	return halfBlock(frame, cols, rows, true)
+}
+
+func halfBlock(frame image.Image, cols, rows int, indexed bool) string {
 	if frame == nil || cols < 1 || rows < 1 {
 		return ""
 	}
@@ -26,8 +35,14 @@ func HalfBlock(frame image.Image, cols, rows int) string {
 				b.Min.X+(2*x+1)*w/(2*cols), b.Min.Y+(4*y+1)*h/(4*rows))
 			bot := sampleAt(frame, b,
 				b.Min.X+(2*x+1)*w/(2*cols), b.Min.Y+(4*y+3)*h/(4*rows))
-			fmt.Fprintf(&sb, "\x1b[38;2;%d;%d;%d;48;2;%d;%d;%dm▀",
-				top[0], top[1], top[2], bot[0], bot[1], bot[2])
+			if indexed {
+				fmt.Fprintf(&sb, "\x1b[38;5;%d;48;5;%dm▀",
+					XTerm256(color.RGBA{top[0], top[1], top[2], 255}),
+					XTerm256(color.RGBA{bot[0], bot[1], bot[2], 255}))
+			} else {
+				fmt.Fprintf(&sb, "\x1b[38;2;%d;%d;%d;48;2;%d;%d;%dm▀",
+					top[0], top[1], top[2], bot[0], bot[1], bot[2])
+			}
 		}
 		sb.WriteString("\x1b[0m")
 		if y < rows-1 {
