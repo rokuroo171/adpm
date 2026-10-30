@@ -16,18 +16,19 @@ func TestFit(t *testing.T) {
 		cellW, cellH       int
 		wantCols, wantRows int
 	}{
-		{"80x24", 320, 180, 80, 24, 8, 16, 40, 12},
+		{"80x24", 320, 180, 80, 24, 8, 16, 80, 23},
 		{"40x20", 320, 180, 40, 20, 8, 16, 40, 12},
 		{"30x10", 320, 180, 30, 10, 8, 16, 30, 9},
 		{"20x6", 320, 180, 20, 6, 8, 16, 20, 6},
 		{"1x1", 320, 180, 1, 1, 8, 16, 1, 1},
 		{"0x0", 320, 180, 0, 0, 8, 16, 1, 1},
-		{"400x100 caps box at 100x36", 320, 180, 400, 100, 8, 16, 40, 12},
+		{"90x70 fills width without exceeding height cap", 320, 180, 90, 70, 8, 16, 90, 26},
+		{"400x100 caps box at 100x36", 320, 180, 400, 100, 8, 16, 100, 29},
 		{"300x8 fits width only", 320, 180, 300, 8, 8, 16, 29, 8},
-		{"1000x1000", 320, 180, 1000, 1000, 8, 16, 40, 12},
+		{"1000x1000", 320, 180, 1000, 1000, 8, 16, 100, 29},
 		{"pixel size reported 0 falls back to 1:2", 320, 180, 80, 24, 0, 0, 80, 23},
 		{"cell aspect 1:2 fallback also for negative", 320, 180, 40, 20, -1, -1, 40, 12},
-		{"zero frame clamps to 1", 0, 0, 80, 24, 8, 16, 1, 1},
+		{"zero frame dimensions are treated as 1x1", 0, 0, 80, 24, 8, 16, 48, 24},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
