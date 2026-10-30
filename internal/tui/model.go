@@ -84,7 +84,7 @@ func (m *model) View() string {
 		remaining = 0
 	}
 	secs := int(math.Ceil(remaining.Seconds()))
-	bar := countdownBar(remaining, m.total, m.cols)
+	bar := render.Truncate(countdownBar(remaining, m.total, m.cols), m.cols)
 
 	var content string
 	if m.mode == render.ModeCompact {
