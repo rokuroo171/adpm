@@ -355,6 +355,31 @@ func TestGraphicPayloadCacheSurvivesChromeRefresh(t *testing.T) {
 	}
 }
 
+func TestPopupStopsRenderTicksUntilDismissed(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if _, cmd := m.Update(chromeTickMsg(time.Now())); cmd != nil {
+		t.Fatal("chrome tick continued while modal was open")
+	}
+	if _, cmd := m.Update(tickMsg(time.Now())); cmd != nil {
+		t.Fatal("frame tick continued while modal was open")
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if cmd == nil {
+		t.Fatal("dismissing modal did not restart playback ticks")
+	}
+}
+
+func TestRasterPopupReusesUndimmedSourceFrame(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.View()
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m.View()
+	if m.dimFrameImage != nil {
+		t.Fatal("raster popup needlessly created a dimmed source frame")
+	}
+}
+
 func TestKeys(t *testing.T) {
 	m := newTestModel(t, 80, 24)
 	m.rewardLines = []string{"Reward line one", "Reward line two"}
@@ -417,6 +442,29 @@ func TestReportValidation(t *testing.T) {
 		if got := validReport(tt.text); got != tt.want {
 			t.Errorf("validReport(%q) = %v, want %v", tt.text, got, tt.want)
 		}
+	}
+}
+
+func TestReportInputAcceptsSpacesAndEnterMovesToSubmit(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	for _, r := range []rune("This is bad ad") {
+		if r == ' ' {
+			m.Update(tea.KeyMsg{Type: tea.KeySpace})
+		} else {
+			m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+	if m.reportText != "This is bad ad" {
+		t.Fatalf("report text = %q, want %q", m.reportText, "This is bad ad")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.reportFocus != reportFocusSubmit || m.reportSubmitted {
+		t.Fatalf("Enter from input should focus Submit, focus=%d submitted=%v", m.reportFocus, m.reportSubmitted)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.reportSubmitted {
+		t.Fatal("Enter on focused Submit did not submit the valid report")
 	}
 }
 
@@ -520,8 +568,8 @@ func TestRewardPopupPausesAdUntilDismissed(t *testing.T) {
 		t.Fatalf("elapsed during popup = %v, want frozen value %v", got, wantElapsed)
 	}
 	_, cmd := m.Update(tickMsg(time.Now()))
-	if m.result.Finished || cmd == nil {
-		t.Fatal("the ad finished while the reward popup was open")
+	if m.result.Finished || cmd != nil {
+		t.Fatal("the paused ad finished or kept ticking while the reward popup was open")
 	}
 }
 

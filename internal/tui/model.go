@@ -22,45 +22,46 @@ const chromeInterval = time.Second / 30
 
 // model drives one ad playback.
 type model struct {
-	frames          []image.Image
-	title           string
-	total           time.Duration
-	start           time.Time
-	cols            int
-	rows            int
-	cellW           int
-	cellH           int
-	tier            render.Tier
-	trueColor       bool
-	mode            render.Mode
-	frameIx         int
-	popup           popupKind
-	choice          int
-	paused          time.Time
-	message         string
-	messageUntil    time.Time
-	rewardLines     []string
-	reportMessage   string
-	rewardIndex     int
-	result          Result
-	graphicValid    bool
-	graphicFrame    int
-	graphicTier     render.Tier
-	graphicData     string
-	graphicDim      bool
-	rasterValid     bool
-	rasterFrame     int
-	rasterCols      int
-	rasterRows      int
-	rasterTier      render.Tier
-	rasterTrueColor bool
-	rasterDim       bool
-	rasterData      string
-	dimFrameIndex   int
-	dimFrameImage   image.Image
-	reportText      string
-	reportFocus     int
-	reportSubmitted bool
+	frames            []image.Image
+	title             string
+	total             time.Duration
+	start             time.Time
+	cols              int
+	rows              int
+	cellW             int
+	cellH             int
+	tier              render.Tier
+	trueColor         bool
+	mode              render.Mode
+	frameIx           int
+	popup             popupKind
+	choice            int
+	paused            time.Time
+	message           string
+	messageUntil      time.Time
+	rewardLines       []string
+	reportMessage     string
+	rewardIndex       int
+	result            Result
+	graphicValid      bool
+	graphicFrame      int
+	graphicTier       render.Tier
+	graphicData       string
+	graphicDim        bool
+	rasterValid       bool
+	rasterFrame       int
+	rasterCols        int
+	rasterRows        int
+	rasterTier        render.Tier
+	rasterTrueColor   bool
+	rasterData        string
+	dimFrameIndex     int
+	dimFrameImage     image.Image
+	frameTickPending  bool
+	chromeTickPending bool
+	reportText        string
+	reportFocus       int
+	reportSubmitted   bool
 }
 
 type popupKind uint8
@@ -80,10 +81,20 @@ const (
 )
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(
-		tea.Tick(frameInterval, func(t time.Time) tea.Msg { return tickMsg(t) }),
-		tea.Tick(chromeInterval, func(t time.Time) tea.Msg { return chromeTickMsg(t) }),
-	)
+	return m.ensurePlaybackTicks()
+}
+
+func (m *model) ensurePlaybackTicks() tea.Cmd {
+	var cmds []tea.Cmd
+	if !m.frameTickPending {
+		m.frameTickPending = true
+		cmds = append(cmds, tea.Tick(frameInterval, func(t time.Time) tea.Msg { return tickMsg(t) }))
+	}
+	if !m.chromeTickPending {
+		m.chromeTickPending = true
+		cmds = append(cmds, tea.Tick(chromeInterval, func(t time.Time) tea.Msg { return chromeTickMsg(t) }))
+	}
+	return tea.Batch(cmds...)
 }
 
 // resize recomputes the layout tier for the current terminal size. Once the
@@ -98,8 +109,9 @@ func (m *model) resize() {
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tickMsg:
+		m.frameTickPending = false
 		if m.popup != popupNone {
-			return m, tea.Tick(frameInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+			return m, nil
 		}
 		if m.message != "" && time.Now().After(m.messageUntil) {
 			m.message = ""
@@ -115,10 +127,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ix = len(m.frames) - 1
 		}
 		m.frameIx = ix
-		return m, tea.Tick(frameInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+		return m, m.ensurePlaybackTicks()
 
 	case chromeTickMsg:
-		return m, tea.Tick(chromeInterval, func(t time.Time) tea.Msg { return chromeTickMsg(t) })
+		m.chromeTickPending = false
+		if m.popup != popupNone {
+			return m, nil
+		}
+		return m, m.ensurePlaybackTicks()
 
 	case tea.WindowSizeMsg:
 		m.cols, m.rows = msg.Width, msg.Height
@@ -164,6 +180,7 @@ func (m *model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			m.resumePopup()
+			return m, m.ensurePlaybackTicks()
 		case "ctrl+c":
 			return m, nil
 		case "left", "right", "tab":
@@ -171,6 +188,7 @@ func (m *model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.choice == 0 {
 				m.resumePopup()
+				return m, m.ensurePlaybackTicks()
 			} else {
 				m.result.Cancelled = true
 				return m, tea.Quit
@@ -185,24 +203,29 @@ func (m *model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.frameIx = 0
 			m.popup = popupNone
 			m.message = ""
+			return m, m.ensurePlaybackTicks()
 		}
 		return m, nil
 	}
 	switch msg.String() {
 	case "esc":
 		m.resumePopup()
+		return m, m.ensurePlaybackTicks()
 	case "tab", "right":
 		m.reportFocus = (m.reportFocus + 1) % 3
 	case "shift+tab", "left":
 		m.reportFocus = (m.reportFocus + 2) % 3
 	case "enter":
 		switch m.reportFocus {
+		case reportFocusInput:
+			m.reportFocus = reportFocusSubmit
 		case reportFocusSubmit:
 			if validReport(m.reportText) {
 				m.reportSubmitted = true
 			}
 		case reportFocusCancel:
 			m.resumePopup()
+			return m, m.ensurePlaybackTicks()
 		}
 	case "backspace", "ctrl+h":
 		if m.reportFocus == reportFocusInput {
@@ -212,9 +235,12 @@ func (m *model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	default:
-		if m.reportFocus == reportFocusInput && msg.Type == tea.KeyRunes {
+		if m.reportFocus == reportFocusInput && (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) {
 			add := string(msg.Runes)
-			if len([]rune(m.reportText))+len(msg.Runes) <= reportMaxLength {
+			if msg.Type == tea.KeySpace {
+				add = " "
+			}
+			if len([]rune(m.reportText))+utf8.RuneCountInString(add) <= reportMaxLength {
 				m.reportText += add
 			}
 		}
@@ -273,7 +299,7 @@ func (m *model) View() string {
 	var content string
 	var graphicPayload, graphicPlaceholder string
 	displayFrame := m.frames[m.frameIx]
-	if m.popup != popupNone {
+	if m.popup != popupNone && isGraphicTier(m.tier) {
 		displayFrame = m.dimmedFrame()
 	}
 	if m.mode == render.ModeCompact {
@@ -534,10 +560,9 @@ func (m *model) encodeGraphicFrame(frame image.Image) (string, error) {
 }
 
 func (m *model) renderRaster(frame image.Image, cols, rows int) string {
-	dim := m.popup != popupNone
 	if m.rasterValid && m.rasterFrame == m.frameIx && m.rasterCols == cols &&
 		m.rasterRows == rows && m.rasterTier == m.tier &&
-		m.rasterTrueColor == m.trueColor && m.rasterDim == dim {
+		m.rasterTrueColor == m.trueColor {
 		return m.rasterData
 	}
 	switch m.tier {
@@ -558,8 +583,11 @@ func (m *model) renderRaster(frame image.Image, cols, rows int) string {
 	m.rasterRows = rows
 	m.rasterTier = m.tier
 	m.rasterTrueColor = m.trueColor
-	m.rasterDim = dim
 	return m.rasterData
+}
+
+func isGraphicTier(tier render.Tier) bool {
+	return tier == render.TierKitty || tier == render.TierSixel || tier == render.TierITerm2
 }
 
 func dimFrame(frame image.Image) image.Image {
