@@ -1,11 +1,13 @@
 package render
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestFit(t *testing.T) {
@@ -149,6 +151,136 @@ func TestHalfBlock(t *testing.T) {
 			t.Errorf("line %d has stray content: %q", i, line)
 		}
 	}
+}
+
+func TestHalfBlockOptimizedSerializerPreservesVirtualCellGrid(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 12, 8))
+	colors := [][3]uint8{
+		{240, 20, 10}, {15, 210, 30}, {25, 40, 230},
+		{230, 200, 15}, {180, 25, 210},
+	}
+	for row := 0; row < 4; row++ {
+		for col := 0; col < 6; col++ {
+			top := colors[(row+col)%3]
+			bottom := top
+			if col%3 != 0 {
+				bottom = colors[(row+col+2)%len(colors)]
+			}
+			for x := col * 2; x < col*2+2; x++ {
+				img.Set(x, row*2, color.RGBA{R: top[0], G: top[1], B: top[2], A: 255})
+				img.Set(x, row*2+1, color.RGBA{R: bottom[0], G: bottom[1], B: bottom[2], A: 255})
+			}
+		}
+	}
+
+	const cols, rows = 6, 4
+	legacy := legacyHalfBlock(img, cols, rows)
+	optimized := HalfBlock(img, cols, rows)
+	if got, want := renderHalfBlockPixels(optimized, cols, rows), renderHalfBlockPixels(legacy, cols, rows); !equalHalfBlockPixels(got, want) {
+		t.Fatal("optimized half-block output changes the rendered cell grid")
+	}
+	if len(optimized) >= len(legacy) {
+		t.Fatalf("optimized output is %d bytes, legacy output is %d bytes", len(optimized), len(legacy))
+	}
+}
+
+func legacyHalfBlock(frame image.Image, cols, rows int) string {
+	b := frame.Bounds()
+	w, h := b.Dx(), b.Dy()
+	var out strings.Builder
+	for y := 0; y < rows; y++ {
+		for x := 0; x < cols; x++ {
+			top := sampleRegion(frame, b, b.Min.X+x*w/cols, b.Min.Y+y*h/(2*rows),
+				b.Min.X+(x+1)*w/cols, b.Min.Y+(2*y+1)*h/(2*rows))
+			bottom := sampleRegion(frame, b, b.Min.X+x*w/cols, b.Min.Y+(2*y+1)*h/(2*rows),
+				b.Min.X+(x+1)*w/cols, b.Min.Y+(2*y+2)*h/(2*rows))
+			fmt.Fprintf(&out, "\x1b[38;2;%d;%d;%d;48;2;%d;%d;%dm▀", top[0], top[1], top[2], bottom[0], bottom[1], bottom[2])
+		}
+		out.WriteString("\x1b[0m")
+		if y < rows-1 {
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
+}
+
+func renderHalfBlockPixels(s string, cols, rows int) [][3]uint8 {
+	pixels := make([][3]uint8, cols*rows*2)
+	var foreground, background [3]uint8
+	x, y := 0, 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			end := strings.IndexByte(s[i:], 'm')
+			if end < 0 {
+				break
+			}
+			applyHalfBlockSGR(s[i+2:i+end], &foreground, &background)
+			i += end + 1
+			continue
+		}
+		if s[i] == '\n' {
+			x, y = 0, y+1
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch r {
+		case '▀':
+			if x < cols && y < rows {
+				at := (y*cols + x) * 2
+				pixels[at], pixels[at+1] = foreground, background
+			}
+			x++
+		case ' ':
+			if x < cols && y < rows {
+				at := (y*cols + x) * 2
+				pixels[at], pixels[at+1] = background, background
+			}
+			x++
+		}
+		i += size
+	}
+	return pixels
+}
+
+func applyHalfBlockSGR(params string, foreground, background *[3]uint8) {
+	values := strings.Split(params, ";")
+	for i := 0; i < len(values); i++ {
+		if values[i] == "0" {
+			*foreground, *background = [3]uint8{}, [3]uint8{}
+			continue
+		}
+		if (values[i] != "38" && values[i] != "48") || i+4 >= len(values) || values[i+1] != "2" {
+			continue
+		}
+		c := [3]uint8{uint8(parseHalfBlockByte(values[i+2])), uint8(parseHalfBlockByte(values[i+3])), uint8(parseHalfBlockByte(values[i+4]))}
+		if values[i] == "38" {
+			*foreground = c
+		} else {
+			*background = c
+		}
+		i += 4
+	}
+}
+
+func parseHalfBlockByte(value string) int {
+	var out int
+	for _, digit := range value {
+		out = out*10 + int(digit-'0')
+	}
+	return out
+}
+
+func equalHalfBlockPixels(a, b [][3]uint8) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestHalfBlockEdgeCases(t *testing.T) {

@@ -143,6 +143,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.cols, m.rows = msg.Width, msg.Height
 		m.resize()
+		m.rasterValid = false
 		m.popupBaseValid = false
 		m.popupGraphicClear = false
 		return m, nil

@@ -62,8 +62,8 @@ func TestViewAtDoneWhenSizes(t *testing.T) {
 		wantTier   render.Mode
 		wantMarker string
 	}{
-		{80, 24, render.ModeFull, "▀"},
-		{40, 20, render.ModeFull, "▀"},
+		{80, 24, render.ModeFull, "48;2;180;90;40"},
+		{40, 20, render.ModeFull, "48;2;180;90;40"},
 		{20, 6, render.ModeCompact, "Ad"},
 	}
 	for _, tt := range tests {

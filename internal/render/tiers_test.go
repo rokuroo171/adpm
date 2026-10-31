@@ -69,7 +69,7 @@ func TestXTerm256(t *testing.T) {
 func TestHalfBlock256(t *testing.T) {
 	img := image.NewUniform(color.RGBA{255, 0, 0, 255})
 	got := HalfBlock256(img, 1, 1)
-	if !strings.Contains(got, "\x1b[38;5;196;48;5;196m▀") {
+	if !strings.Contains(got, "\x1b[48;5;196m ") {
 		t.Errorf("HalfBlock256 missing indexed color sequence: %q", got)
 	}
 }

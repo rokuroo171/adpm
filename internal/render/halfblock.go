@@ -407,6 +407,8 @@ func halfBlock(frame image.Image, cols, rows int, indexed bool) string {
 
 	var sb strings.Builder
 	for y := 0; y < rows; y++ {
+		var previousTop, previousBottom [3]uint8
+		hasForeground, hasBackground := false, false
 		for x := 0; x < cols; x++ {
 			top := sampleRegion(frame, b,
 				b.Min.X+x*w/cols, b.Min.Y+y*h/(2*rows),
@@ -415,13 +417,38 @@ func halfBlock(frame image.Image, cols, rows int, indexed bool) string {
 				b.Min.X+x*w/cols, b.Min.Y+(2*y+1)*h/(2*rows),
 				b.Min.X+(x+1)*w/cols, b.Min.Y+(2*y+2)*h/(2*rows))
 			if indexed {
-				fmt.Fprintf(&sb, "\x1b[38;5;%d;48;5;%dm▀",
-					XTerm256(color.RGBA{top[0], top[1], top[2], 255}),
-					XTerm256(color.RGBA{bot[0], bot[1], bot[2], 255}))
-			} else {
-				fmt.Fprintf(&sb, "\x1b[38;2;%d;%d;%d;48;2;%d;%d;%dm▀",
-					top[0], top[1], top[2], bot[0], bot[1], bot[2])
+				top = [3]uint8{XTerm256(color.RGBA{top[0], top[1], top[2], 255})}
+				bot = [3]uint8{XTerm256(color.RGBA{bot[0], bot[1], bot[2], 255})}
 			}
+			sameColor := top == bot
+			foregroundChanged := !hasForeground || top != previousTop
+			backgroundChanged := !hasBackground || bot != previousBottom
+			if sameColor {
+				if backgroundChanged {
+					sb.WriteString("\x1b[")
+					writeHalfBlockColor(&sb, bot, indexed, true)
+					sb.WriteByte('m')
+				}
+				sb.WriteByte(' ')
+				previousBottom, hasBackground = bot, true
+				continue
+			}
+			if foregroundChanged || backgroundChanged {
+				sb.WriteString("\x1b[")
+				if foregroundChanged {
+					writeHalfBlockColor(&sb, top, indexed, false)
+				}
+				if backgroundChanged {
+					if foregroundChanged {
+						sb.WriteByte(';')
+					}
+					writeHalfBlockColor(&sb, bot, indexed, true)
+				}
+				sb.WriteByte('m')
+			}
+			sb.WriteRune('▀')
+			previousTop, previousBottom = top, bot
+			hasForeground, hasBackground = true, true
 		}
 		sb.WriteString("\x1b[0m")
 		if y < rows-1 {
@@ -429,6 +456,18 @@ func halfBlock(frame image.Image, cols, rows int, indexed bool) string {
 		}
 	}
 	return sb.String()
+}
+
+func writeHalfBlockColor(out *strings.Builder, c [3]uint8, indexed, background bool) {
+	code := 38
+	if background {
+		code = 48
+	}
+	if indexed {
+		fmt.Fprintf(out, "%d;5;%d", code, c[0])
+		return
+	}
+	fmt.Fprintf(out, "%d;2;%d;%d;%d", code, c[0], c[1], c[2])
 }
 
 func sampleRegion(img image.Image, b image.Rectangle, x0, y0, x1, y1 int) [3]uint8 {
