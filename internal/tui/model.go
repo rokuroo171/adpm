@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"image"
-	"image/color"
 	"math"
 	"strings"
 	"time"
@@ -47,7 +46,6 @@ type model struct {
 	graphicFrame      int
 	graphicTier       render.Tier
 	graphicData       string
-	graphicDim        bool
 	rasterValid       bool
 	rasterFrame       int
 	rasterCols        int
@@ -55,8 +53,11 @@ type model struct {
 	rasterTier        render.Tier
 	rasterTrueColor   bool
 	rasterData        string
-	dimFrameIndex     int
-	dimFrameImage     image.Image
+	popupBase         render.CellGrid
+	popupBaseValid    bool
+	popupGraphicClear bool
+	playerBlockTop    int
+	playerBlockHeight int
 	frameTickPending  bool
 	chromeTickPending bool
 	reportText        string
@@ -139,6 +140,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.cols, m.rows = msg.Width, msg.Height
 		m.resize()
+		m.popupBaseValid = false
+		m.popupGraphicClear = false
 		return m, nil
 
 	case tea.KeyMsg:
@@ -148,11 +151,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			m.popup = popupReward
+			m.popupBaseValid = false
+			m.popupGraphicClear = false
 			m.choice = 0
 			m.paused = time.Now()
 			m.rewardIndex++
 		case "r":
 			m.popup = popupReport
+			m.popupBaseValid = false
+			m.popupGraphicClear = false
 			m.paused = time.Now()
 			m.reportText = ""
 			m.reportFocus = reportFocusInput
@@ -202,6 +209,8 @@ func (m *model) updatePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.paused = time.Time{}
 			m.frameIx = 0
 			m.popup = popupNone
+			m.popupBaseValid = false
+			m.popupGraphicClear = false
 			m.message = ""
 			return m, m.ensurePlaybackTicks()
 		}
@@ -252,6 +261,8 @@ func (m *model) resumePopup() {
 	m.start = m.start.Add(time.Since(m.paused))
 	m.paused = time.Time{}
 	m.popup = popupNone
+	m.popupBaseValid = false
+	m.popupGraphicClear = false
 	m.message = ""
 }
 
@@ -291,6 +302,9 @@ func (m *model) View() string {
 	if m.cols < 1 || m.rows < 1 {
 		return ""
 	}
+	if m.popup != popupNone && m.popupBaseValid {
+		return m.popupViewOnGrid()
+	}
 	elapsed := m.elapsedAt(time.Now())
 	remaining := m.total - elapsed
 	if remaining < 0 {
@@ -299,9 +313,6 @@ func (m *model) View() string {
 	var content string
 	var graphicPayload, graphicPlaceholder string
 	displayFrame := m.frames[m.frameIx]
-	if m.popup != popupNone && isGraphicTier(m.tier) {
-		displayFrame = m.dimmedFrame()
-	}
 	if m.mode == render.ModeCompact {
 		width := max(min(m.cols-2, 100), 1)
 		footer := footerLine(m, elapsed, width)
@@ -309,7 +320,7 @@ func (m *model) View() string {
 			footer = render.Truncate(m.message, width)
 		}
 		content = strings.Join([]string{
-			headerLine(width, remaining),
+			headerLine(width, remaining, m.popup != popupNone),
 			progressBar(elapsed, m.total, width, m.tier == render.TierASCII),
 			"",
 			footer,
@@ -323,7 +334,9 @@ func (m *model) View() string {
 		switch m.tier {
 		case render.TierKitty, render.TierSixel, render.TierITerm2:
 			graphicPlaceholder = cellPlaceholder(boxCols, boxRows)
-			if payload, err := m.encodeGraphicFrame(displayFrame); err == nil {
+			if m.popup != popupNone {
+				img = graphicPlaceholder
+			} else if payload, err := m.encodeGraphicFrame(displayFrame); err == nil {
 				graphicPayload = payload
 				img = graphicPlaceholder
 			} else {
@@ -338,13 +351,13 @@ func (m *model) View() string {
 		}
 		if m.message != "" {
 			content = strings.Join([]string{
-				headerLine(boxCols, remaining), img,
+				headerLine(boxCols, remaining, m.popup != popupNone), img,
 				progressBar(elapsed, m.total, boxCols, m.tier == render.TierASCII), "",
 				render.Truncate(m.message, boxCols),
 			}, "\n")
 		} else {
 			content = strings.Join([]string{
-				headerLine(boxCols, remaining), img,
+				headerLine(boxCols, remaining, m.popup != popupNone), img,
 				progressBar(elapsed, m.total, boxCols, m.tier == render.TierASCII), "",
 				footerLine(m, elapsed, boxCols),
 			}, "\n")
@@ -352,126 +365,78 @@ func (m *model) View() string {
 	}
 	contentHeight := lipgloss.Height(content)
 	top := max(m.rows/3-contentHeight/2, 0)
+	m.playerBlockTop = top
+	m.playerBlockHeight = contentHeight
 	view := lipgloss.Place(m.cols, m.rows, lipgloss.Center, lipgloss.Top,
 		strings.Repeat("\n", top)+content)
 	if graphicPayload != "" {
 		placeholderRow := strings.SplitN(graphicPlaceholder, "\n", 2)[0]
 		view = strings.Replace(view, placeholderRow,
 			m.clearKitty()+graphicPayload+placeholderRow, 1)
-	} else if m.tier == render.TierKitty && m.mode == render.ModeCompact {
+	} else if m.popup == popupNone && m.tier == render.TierKitty && m.mode == render.ModeCompact {
 		view = m.clearKitty() + view
 	}
 	if m.popup != popupNone {
-		return overlayPopup(m.dimView(view), m.popupView(), m.cols, m.rows)
+		base := render.ParseANSIGrid(view, m.cols, m.rows, func(r rune) int { return lipgloss.Width(string(r)) })
+		m.popupBase = render.DimGrid(base, 0.4, m.tier == render.TierASCII)
+		m.popupBaseValid = true
+		m.popupGraphicClear = false
+		return m.popupViewOnGrid()
 	}
+	m.popupBaseValid = false
 	return view
 }
 
-func (m *model) dimView(view string) string {
-	return lipgloss.NewStyle().Faint(true).Render(view)
+func (m *model) popupOrigin(width, height int) (int, int) {
+	centerY := m.rows / 2
+	if m.playerBlockHeight > 0 {
+		centerY = m.playerBlockTop + m.playerBlockHeight/2
+	}
+	return max((m.cols-width)/2, 0), centerY - height/2
 }
 
-func overlayPopup(base, popup string, cols, rows int) string {
-	placed := lipgloss.Place(cols, rows, lipgloss.Center, lipgloss.Center, popup)
-	baseLines := strings.Split(base, "\n")
-	popupLines := strings.Split(placed, "\n")
-	for y := range baseLines {
-		if y >= len(popupLines) || strings.TrimSpace(stripANSI(popupLines[y])) == "" {
+func (m *model) popupViewOnGrid() string {
+	panel := m.popupView()
+	panelWidth, panelHeight := lipgloss.Width(panel), lipgloss.Height(panel)
+	panelGrid := render.ParseANSIGrid(panel, panelWidth, panelHeight,
+		func(r rune) int { return lipgloss.Width(string(r)) })
+	if m.popup == popupReport && !m.reportSubmitted && m.reportFocus == reportFocusInput {
+		underlineInputCursor(&panelGrid)
+	}
+	x, y := m.popupOrigin(panelWidth, panelHeight)
+	grid := render.OverlayGrid(m.popupBase, panelGrid, x, y)
+	if isGraphicTier(m.tier) {
+		clear := ""
+		if !m.popupGraphicClear {
+			clear = m.clearGraphic()
+			m.popupGraphicClear = true
+		}
+		return clear + render.RenderGrid(grid)
+	}
+	return render.RenderGrid(grid)
+}
+
+func underlineInputCursor(grid *render.CellGrid) {
+	for i := range grid.Cells {
+		if grid.Cells[i].Rune != '▏' {
 			continue
 		}
-		baseLines[y] = overlayLine(baseLines[y], popupLines[y], cols)
-	}
-	return strings.Join(baseLines, "\n")
-}
-
-func overlayLine(base, overlay string, width int) string {
-	overlayWidth := lipgloss.Width(overlay)
-	left := max((width-overlayWidth)/2, 0)
-	return cutCells(base, 0, left) + overlay + cutCells(base, left+overlayWidth, width)
-}
-
-func cutCells(s string, start, end int) string {
-	var out, priorSGR strings.Builder
-	cells := 0
-	wroteCell := false
-	for i := 0; i < len(s); {
-		if s[i] == '\x1b' {
-			j := escapeEnd(s, i)
-			sequence := s[i:j]
-			if strings.HasPrefix(sequence, "\x1b[") && strings.HasSuffix(sequence, "m") {
-				if cells < start {
-					priorSGR.WriteString(sequence)
-				} else if cells < end {
-					if !wroteCell && start > 0 {
-						out.WriteString(priorSGR.String())
-						wroteCell = true
-					}
-					out.WriteString(sequence)
-				} else if sequence == "\x1b[0m" {
-					out.WriteString(sequence)
-					break
-				}
-			} else if cells >= start && cells < end {
-				out.WriteString(sequence)
+		y := i / grid.Width
+		for x := i % grid.Width; x >= 0; x-- {
+			cell := &grid.Cells[y*grid.Width+x]
+			if cell.Rune == '│' || cell.Rune == '╭' || cell.Rune == '╰' {
+				break
 			}
-			i = j
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		w := lipgloss.Width(string(r))
-		if cells >= start && cells+w <= end {
-			if !wroteCell && start > 0 {
-				out.WriteString(priorSGR.String())
-			}
-			out.WriteRune(r)
-			wroteCell = true
-		}
-		cells += w
-		i += size
-	}
-	return out.String()
-}
-
-func stripANSI(s string) string {
-	var out strings.Builder
-	for i := 0; i < len(s); {
-		if s[i] == '\x1b' {
-			i = escapeEnd(s, i)
-			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		out.WriteRune(r)
-		i += size
-	}
-	return out.String()
-}
-
-func escapeEnd(s string, start int) int {
-	if start+1 >= len(s) {
-		return len(s)
-	}
-	switch s[start+1] {
-	case '[':
-		for i := start + 2; i < len(s); i++ {
-			if s[i] >= 0x40 && s[i] <= 0x7e {
-				return i + 1
-			}
-		}
-	case ']', 'P', '_', '^':
-		for i := start + 2; i < len(s); i++ {
-			if s[i] == '\a' {
-				return i + 1
-			}
-			if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '\\' {
-				return i + 2
-			}
+			cell.Underline = true
 		}
 	}
-	return min(start+2, len(s))
 }
 
-func headerLine(width int, remaining time.Duration) string {
+func headerLine(width int, remaining time.Duration, paused bool) string {
 	label, timer := "Ad", formatTime(remaining)
+	if paused {
+		label = "Ad · paused"
+	}
 	spaces := max(width-lipgloss.Width(label)-lipgloss.Width(timer), 1)
 	return render.Truncate(label+strings.Repeat(" ", spaces)+timer, width)
 }
@@ -543,8 +508,7 @@ func footerLine(m *model, elapsed time.Duration, width int) string {
 }
 
 func (m *model) encodeGraphicFrame(frame image.Image) (string, error) {
-	dim := m.popup != popupNone
-	if m.graphicValid && m.graphicFrame == m.frameIx && m.graphicTier == m.tier && m.graphicDim == dim {
+	if m.graphicValid && m.graphicFrame == m.frameIx && m.graphicTier == m.tier {
 		return m.graphicData, nil
 	}
 	var encoded strings.Builder
@@ -555,7 +519,6 @@ func (m *model) encodeGraphicFrame(frame image.Image) (string, error) {
 	m.graphicFrame = m.frameIx
 	m.graphicTier = m.tier
 	m.graphicData = encoded.String()
-	m.graphicDim = dim
 	return m.graphicData, nil
 }
 
@@ -590,33 +553,6 @@ func isGraphicTier(tier render.Tier) bool {
 	return tier == render.TierKitty || tier == render.TierSixel || tier == render.TierITerm2
 }
 
-func dimFrame(frame image.Image) image.Image {
-	if uniform, ok := frame.(*image.Uniform); ok {
-		r, g, b, a := uniform.C.RGBA()
-		return image.NewUniform(color.RGBA{R: uint8((r >> 8) / 2), G: uint8((g >> 8) / 2), B: uint8((b >> 8) / 2), A: uint8(a >> 8)})
-	}
-	b := frame.Bounds()
-	dim := image.NewRGBA(b)
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			r, g, bl, a := frame.At(x, y).RGBA()
-			dim.SetRGBA(x, y, color.RGBA{
-				R: uint8((r >> 8) / 2), G: uint8((g >> 8) / 2),
-				B: uint8((bl >> 8) / 2), A: uint8(a >> 8),
-			})
-		}
-	}
-	return dim
-}
-
-func (m *model) dimmedFrame() image.Image {
-	if m.dimFrameImage == nil || m.dimFrameIndex != m.frameIx {
-		m.dimFrameImage = dimFrame(m.frames[m.frameIx])
-		m.dimFrameIndex = m.frameIx
-	}
-	return m.dimFrameImage
-}
-
 func cellPlaceholder(cols, rows int) string {
 	line := strings.Repeat("\u2800", cols)
 	lines := make([]string, rows)
@@ -644,79 +580,89 @@ func (m *model) clearGraphic() string {
 }
 
 func (m *model) popupView() string {
-	var text string
-	small := m.cols < 24 || m.rows < 10
-	if m.popup == popupReport {
-		if m.reportSubmitted {
-			text = "Thank you. Your report will be reviewed in 3-5 business years.\n\nPress Enter to restart the ad."
-		} else if small {
-			input := m.reportText
-			if m.reportFocus == reportFocusInput {
-				input = lipgloss.NewStyle().Reverse(true).Render(input + " ")
-			}
-			submit, cancel := "Submit", "Cancel"
-			if m.reportFocus == reportFocusSubmit {
-				submit = focusedButton(submit)
-			}
-			if m.reportFocus == reportFocusCancel {
-				cancel = focusedButton(cancel)
-			}
-			text = fmt.Sprintf("Report this ad\n%s\n%d/%d\n%s %s", input, len([]rune(m.reportText)), reportMaxLength, submit, cancel)
+	width := popupWidth(m.cols)
+	inner := max(width-2, 1)
+	narrow := width < 44
+	lines := []string{lipgloss.NewStyle().Faint(true).Render("Ad paused"), ""}
+	switch {
+	case m.popup == popupReward:
+		lines = append(lines, wrapPopupText("Skipping loses your reward and cancels the pending install.", inner), "")
+		continueButton := dialogButton("Continue", m.choice == 0, false)
+		skipButton := dialogButton("Skip", m.choice == 1, false)
+		if narrow {
+			lines = append(lines, continueButton, skipButton)
 		} else {
-			text = m.reportFormView()
+			lines = append(lines, continueButton+"    "+skipButton)
 		}
-		if small {
-			return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).
-				Width(max(m.cols-2, 1)).Background(lipgloss.Color("#181818")).
-				BorderForeground(lipgloss.Color("#777777")).Render(text)
-		}
-		return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(1, 2).
-			Width(min(54, max(m.cols-10, 1))).Background(lipgloss.Color("#181818")).
-			BorderForeground(lipgloss.Color("#777777")).Render(text)
-	}
-	if m.popup == popupReward {
-		line := "Skipping loses your reward and cancels the pending install."
-		continueLabel, skipLabel := "Continue", "Skip"
-		if m.choice == 0 {
-			continueLabel = focusedButton(continueLabel)
+	case m.popup == popupReport && m.reportSubmitted:
+		lines[0] = lipgloss.NewStyle().Faint(true).Render("Report this ad")
+		lines = append(lines,
+			wrapPopupText("Thank you. Your report will be reviewed in 3-5 business years.", inner),
+			"",
+			wrapPopupText("Press Enter to restart the ad.", inner))
+	case m.popup == popupReport:
+		lines[0] = lipgloss.NewStyle().Faint(true).Render("Report this ad")
+		lines = append(lines,
+			wrapPopupText("Why are you reporting this ad?", inner),
+			reportInputLine(m.reportText, inner, m.reportFocus == reportFocusInput),
+			fmt.Sprintf("%d/%d", len([]rune(m.reportText)), reportMaxLength),
+			"")
+		submit := dialogButton("Submit report", m.reportFocus == reportFocusSubmit, !validReport(m.reportText))
+		cancel := dialogButton("Cancel", m.reportFocus == reportFocusCancel, false)
+		if narrow {
+			lines = append(lines, submit, cancel)
 		} else {
-			skipLabel = focusedButton(skipLabel)
-		}
-		text = line + "\n\n" + continueLabel + "    " + skipLabel
-		if small {
-			text = "Skipping loses reward and cancels install.\n" + continueLabel + " " + skipLabel
-			return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).
-				Width(max(m.cols-2, 1)).Background(lipgloss.Color("#181818")).
-				BorderForeground(lipgloss.Color("#777777")).Render(text)
+			lines = append(lines, submit+"    "+cancel)
 		}
 	}
-	return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(1, 2).
-		Width(min(54, max(m.cols-10, 1))).Background(lipgloss.Color("#181818")).
-		BorderForeground(lipgloss.Color("#777777")).Render(text)
+	if m.popup != popupReport || !m.reportSubmitted {
+		lines = append(lines, lipgloss.NewStyle().Faint(true).Render("←/→ choose · Enter confirm"))
+	}
+	content := strings.Join(lines, "\n")
+	return lipgloss.NewStyle().Width(inner).Padding(1, 1).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#626262")).
+		Foreground(lipgloss.Color("#D0D0D0")).
+		Background(lipgloss.Color("#171717")).Render(content)
 }
 
-func (m *model) reportFormView() string {
-	input := m.reportText
-	if m.reportFocus == reportFocusInput {
-		input = lipgloss.NewStyle().Reverse(true).Render(input + " ")
+func popupWidth(cols int) int {
+	if cols < 44 {
+		return max(cols-2, 1)
 	}
-	count := len([]rune(m.reportText))
-	validity := validReport(m.reportText)
-	submit := "Submit report"
-	if m.reportFocus == reportFocusSubmit {
-		submit = focusedButton(submit)
-	}
-	if !validity {
-		submit = lipgloss.NewStyle().Faint(true).Render(submit)
-	}
-	cancel := "Cancel"
-	if m.reportFocus == reportFocusCancel {
-		cancel = focusedButton(cancel)
-	}
-	return "Report this ad\n\nWhy are you reporting this ad?\n" + input + "\n" +
-		fmt.Sprintf("%d/%d", count, reportMaxLength) + "\n\n" + submit + "    " + cancel
+	return min(60, max(cols-4, 1))
 }
 
-func focusedButton(label string) string {
-	return lipgloss.NewStyle().Reverse(true).Bold(true).Render("[ " + label + " ]")
+func wrapPopupText(text string, width int) string {
+	return lipgloss.NewStyle().Width(width).Render(text)
+}
+
+func reportInputLine(text string, width int, focused bool) string {
+	cursor := ""
+	if focused {
+		cursor = "▏"
+		width = max(width-lipgloss.Width(cursor), 0)
+	}
+	runes := []rune(text)
+	start, used := len(runes), 0
+	for start > 0 {
+		runeWidth := lipgloss.Width(string(runes[start-1]))
+		if used+runeWidth > width {
+			break
+		}
+		used += runeWidth
+		start--
+	}
+	return lipgloss.NewStyle().Underline(true).Render(string(runes[start:]) + cursor)
+}
+
+func dialogButton(label string, focused, disabled bool) string {
+	style := lipgloss.NewStyle()
+	if focused {
+		style = style.Reverse(true)
+	}
+	if !focused || disabled {
+		style = style.Faint(true)
+	}
+	return style.Render("[ " + label + " ]")
 }

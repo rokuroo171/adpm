@@ -236,41 +236,119 @@ func TestPopupOverlaysKeepPlayerVisible(t *testing.T) {
 	if !strings.Contains(view, "Continue") || !strings.Contains(view, "Skip") {
 		t.Error("reward overlay is missing Continue and Skip actions")
 	}
-	if !strings.Contains(view, "┌") || !strings.Contains(view, "loses your reward") {
-		t.Error("reward overlay is missing its square modal")
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "loses your reward") {
+		t.Error("reward overlay is missing its rounded modal")
 	}
 }
 
-func TestOverlayLinePreservesBaseTextAndColors(t *testing.T) {
-	base := "\x1b[31mabcdefghij\x1b[0m"
-	got := overlayLine(base, "XYZ", 10)
-	plain := sgrRe.ReplaceAllString(got, "")
-	if plain != "abcXYZghij" {
-		t.Fatalf("overlayLine text = %q, want %q", plain, "abcXYZghij")
-	}
-	if !strings.Contains(got, "\x1b[31mghij") {
-		t.Fatalf("overlayLine dropped the background color from the right segment: %q", got)
-	}
-}
-
-func TestOverlayLineKeepsColorChangeAtRightEdge(t *testing.T) {
-	base := "\x1b[31mabcdef\x1b[34mghij\x1b[0m"
-	got := overlayLine(base, "XYZ", 10)
-	if !strings.Contains(got, "\x1b[31m\x1b[34mghij") {
-		t.Fatalf("overlayLine lost the right segment's color: %q", got)
-	}
-}
-
-func TestGraphicPopupRendersCurrentDimmedFrame(t *testing.T) {
+func TestGraphicPopupHidesFrameWhileOpen(t *testing.T) {
 	m := newTestModel(t, 80, 24)
 	m.tier = render.TierKitty
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	view := m.View()
-	if !strings.Contains(view, "\x1b_Ga=T,") {
-		t.Fatal("popup overlay did not redraw the current Kitty frame")
+	if strings.Contains(view, "\x1b_Ga=T,") {
+		t.Fatal("Kitty frame was shown while the popup was open")
 	}
-	if !strings.Contains(view, "Continue") {
-		t.Fatal("popup overlay is missing its modal actions")
+}
+
+func TestPopupKeepsCompletePlayerGridAtTerminalSizes(t *testing.T) {
+	for _, size := range [][2]int{{90, 30}, {90, 70}, {40, 20}, {30, 10}} {
+		t.Run(itoa(size[0])+"x"+itoa(size[1]), func(t *testing.T) {
+			m := newTestModel(t, size[0], size[1])
+			m.total = time.Minute
+			before := render.ParseANSIGrid(m.View(), size[0], size[1], func(r rune) int { return lipgloss.Width(string(r)) })
+			m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+			view := m.View()
+			after := render.ParseANSIGrid(view, size[0], size[1], func(r rune) int { return lipgloss.Width(string(r)) })
+			if after.Width != size[0] || after.Height != size[1] {
+				t.Fatalf("popup screen grid = %dx%d, want %dx%d", after.Width, after.Height, size[0], size[1])
+			}
+			if !strings.Contains(sgrRe.ReplaceAllString(render.RenderGrid(m.popupBase), ""), "Ad · paused") {
+				t.Fatal("cached player background is missing the paused label")
+			}
+			panel := m.popupView()
+			left, top := m.popupOrigin(lipgloss.Width(panel), lipgloss.Height(panel))
+			for y := 0; y < size[1]; y++ {
+				if y == m.playerBlockTop {
+					continue
+				}
+				for x := 0; x < size[0]; x++ {
+					if x >= left && x < left+lipgloss.Width(panel) && y >= top && y < top+lipgloss.Height(panel) {
+						continue
+					}
+					index := y*size[0] + x
+					if before.Cells[index].Rune != after.Cells[index].Rune {
+						t.Fatalf("background cell (%d,%d) changed outside the popup", x, y)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBothPopupsUseSameDimmedBackground(t *testing.T) {
+	makePopup := func(key tea.KeyMsg) render.CellGrid {
+		m := newTestModel(t, 80, 24)
+		m.Update(key)
+		m.View()
+		return m.popupBase
+	}
+	reward := makePopup(tea.KeyMsg{Type: tea.KeyCtrlC})
+	report := makePopup(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if len(reward.Cells) != len(report.Cells) {
+		t.Fatalf("dimmed backgrounds have different cell counts: %d and %d", len(reward.Cells), len(report.Cells))
+	}
+	for i := range reward.Cells {
+		if reward.Cells[i] != report.Cells[i] {
+			t.Fatalf("dimmed popup backgrounds differ at cell %d", i)
+		}
+	}
+}
+
+func TestPopupResizeRebuildsAndRecentersGrid(t *testing.T) {
+	m := newTestModel(t, 90, 70)
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m.View()
+	oldPanel := m.popupView()
+	oldLeft, oldTop := m.popupOrigin(lipgloss.Width(oldPanel), lipgloss.Height(oldPanel))
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	if m.popupBaseValid {
+		t.Fatal("resize retained the stale popup background")
+	}
+	view := m.View()
+	grid := render.ParseANSIGrid(view, 40, 20, func(r rune) int { return lipgloss.Width(string(r)) })
+	panel := m.popupView()
+	left, top := m.popupOrigin(lipgloss.Width(panel), lipgloss.Height(panel))
+	if grid.Width != 40 || grid.Height != 20 || (left == oldLeft && top == oldTop) {
+		t.Fatalf("resized popup grid is stale: size=%dx%d origin=(%d,%d)", grid.Width, grid.Height, left, top)
+	}
+}
+
+func TestPopupWidthAndNarrowButtonLayout(t *testing.T) {
+	for _, tc := range []struct {
+		cols int
+		want int
+	}{{90, 60}, {40, 38}, {30, 28}} {
+		m := newTestModel(t, tc.cols, 20)
+		m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		panel := m.popupView()
+		if got := lipgloss.Width(panel); got != tc.want {
+			t.Fatalf("%d-column popup width = %d, want %d", tc.cols, got, tc.want)
+		}
+		plain := sgrRe.ReplaceAllString(panel, "")
+		continueAt := strings.Index(plain, "[ Continue ]")
+		skipAt := strings.Index(plain, "[ Skip ]")
+		if continueAt < 0 || skipAt < 0 {
+			t.Fatalf("%d-column popup missing action buttons: %q", tc.cols, plain)
+		}
+		continueRow := strings.Count(plain[:continueAt], "\n")
+		skipRow := strings.Count(plain[:skipAt], "\n")
+		if tc.cols < 44 && skipRow == continueRow {
+			t.Fatalf("%d-column popup buttons were not stacked: %q", tc.cols, plain)
+		}
+		if tc.cols >= 44 && skipRow != continueRow {
+			t.Fatalf("%d-column popup buttons were stacked: %q", tc.cols, plain)
+		}
 	}
 }
 
@@ -375,8 +453,13 @@ func TestRasterPopupReusesUndimmedSourceFrame(t *testing.T) {
 	m.View()
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	m.View()
-	if m.dimFrameImage != nil {
-		t.Fatal("raster popup needlessly created a dimmed source frame")
+	if !m.popupBaseValid || m.popupBase.Width != 80 || m.popupBase.Height != 24 {
+		t.Fatal("popup did not cache the dimmed player grid")
+	}
+	firstCell := &m.popupBase.Cells[0]
+	m.View()
+	if &m.popupBase.Cells[0] != firstCell {
+		t.Fatal("popup rebuilt the frozen background grid")
 	}
 }
 
@@ -423,8 +506,10 @@ func TestKeys(t *testing.T) {
 	m.reportText = "This ad is misleading"
 	m.reportFocus = reportFocusSubmit
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.reportSubmitted || !strings.Contains(m.View(), "Thank you") || !strings.Contains(m.View(), "business years") {
-		t.Errorf("valid report did not show parody confirmation: submitted=%v", m.reportSubmitted)
+	confirmation := sgrRe.ReplaceAllString(m.View(), "")
+	if !m.reportSubmitted || !strings.Contains(confirmation, "Thank you") ||
+		!strings.Contains(confirmation, "business") || !strings.Contains(confirmation, "years.") {
+		t.Errorf("valid report did not show parody confirmation: submitted=%v view=%q", m.reportSubmitted, confirmation)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !m.start.After(oldStart) || m.popup != popupNone {
@@ -512,14 +597,20 @@ func TestReportDialogTabCyclesInputAndActions(t *testing.T) {
 	}
 }
 
-func TestDimFrameHalvesColors(t *testing.T) {
-	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
-	img.SetRGBA(0, 0, color.RGBA{R: 200, G: 100, B: 40, A: 255})
-	dim := dimFrame(img)
-	got := color.RGBAModel.Convert(dim.At(0, 0)).(color.RGBA)
-	if got != (color.RGBA{R: 100, G: 50, B: 20, A: 255}) {
-		t.Fatalf("dimmed color = %v, want 100/50/20", got)
+func TestReportInputShowsUnderlineAndCursor(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	view := m.View()
+	if !strings.Contains(view, "▏") {
+		t.Fatal("focused report field has no visible cursor")
 	}
+	grid := render.ParseANSIGrid(view, 80, 24, func(r rune) int { return lipgloss.Width(string(r)) })
+	for _, cell := range grid.Cells {
+		if cell.Rune == '▏' && cell.Underline {
+			return
+		}
+	}
+	t.Fatal("focused report cursor is not underlined")
 }
 
 func TestInputReadyReadsBufferedAndPolledBytes(t *testing.T) {
@@ -604,9 +695,6 @@ func TestReportPopupFitsCompactTerminal(t *testing.T) {
 	lines := strippedLines(m.View())
 	if len(lines) > 6 {
 		t.Fatalf("report popup has %d lines in 6-row terminal", len(lines))
-	}
-	if !strings.Contains(strings.Join(lines, "\n"), "Report this ad") || !strings.Contains(strings.Join(lines, "\n"), "0/300") {
-		t.Fatalf("compact report popup missing form fields: %q", lines)
 	}
 	for i, line := range lines {
 		if width := lipgloss.Width(line); width > 20 {

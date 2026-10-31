@@ -182,3 +182,76 @@ func TestSampleRegionAveragesDownscaledPixels(t *testing.T) {
 		t.Fatalf("sampleRegion = %v, want 127/0/127", got)
 	}
 }
+
+func TestOverlayGridClipsAtScreenEdges(t *testing.T) {
+	makeGrid := func(rows ...string) CellGrid {
+		grid := CellGrid{Width: len([]rune(rows[0])), Height: len(rows)}
+		for _, row := range rows {
+			for _, r := range row {
+				grid.Cells = append(grid.Cells, Cell{Rune: r})
+			}
+		}
+		return grid
+	}
+	text := func(grid CellGrid) string {
+		var out strings.Builder
+		for y := 0; y < grid.Height; y++ {
+			if y > 0 {
+				out.WriteByte('\n')
+			}
+			for x := 0; x < grid.Width; x++ {
+				out.WriteRune(grid.Cells[y*grid.Width+x].Rune)
+			}
+		}
+		return out.String()
+	}
+
+	base := makeGrid("...", "...", "...")
+	panel := makeGrid("AB", "CD")
+	tests := []struct {
+		name  string
+		base  CellGrid
+		panel CellGrid
+		x, y  int
+		want  string
+	}{
+		{"touch top", base, panel, 0, 0, "AB.\nCD.\n..."},
+		{"touch right", base, panel, 1, 0, ".AB\n.CD\n..."},
+		{"touch bottom", base, panel, 0, 1, "...\nAB.\nCD."},
+		{"touch left", base, panel, 0, 0, "AB.\nCD.\n..."},
+		{"panel larger than screen", makeGrid("..", ".."), makeGrid("ABCD", "EFGH", "IJKL"), -1, -1, "FG\nJK"},
+		{"one cell", makeGrid("."), makeGrid("X"), 0, 0, "X"},
+		{"zero sized screen", CellGrid{}, panel, 0, 0, ""},
+		{"zero sized panel", base, CellGrid{}, 0, 0, "...\n...\n..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := text(OverlayGrid(tt.base, tt.panel, tt.x, tt.y)); got != tt.want {
+				t.Fatalf("OverlayGrid() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestANSIGridPreservesColorsAndAttributes(t *testing.T) {
+	grid := ParseANSIGrid("\x1b[1;38;2;12;34;56;48;5;17mA\x1b[0mB", 2, 1, func(rune) int { return 1 })
+	got := RenderGrid(grid)
+	if !strings.Contains(got, "\x1b[0;1;38;2;12;34;56;48;5;17mA") {
+		t.Fatalf("rendered grid lost cell style: %q", got)
+	}
+	if strings.ReplaceAll(ansiRe.ReplaceAllString(got, ""), "\x1b[0m", "") != "AB" {
+		t.Fatalf("rendered grid text = %q, want AB", got)
+	}
+}
+
+func TestDimGridScalesColorsAndFaintsASCII(t *testing.T) {
+	colorGrid := ParseANSIGrid("\x1b[38;2;200;100;40mX", 1, 1, func(rune) int { return 1 })
+	dim := DimGrid(colorGrid, 0.4, false)
+	if got := dim.Cells[0].Foreground; got != (Color{Mode: ColorRGB, R: 80, G: 40, B: 16}) {
+		t.Fatalf("dimmed foreground = %+v, want 80/40/16", got)
+	}
+	ascii := DimGrid(ParseANSIGrid("x", 1, 1, func(rune) int { return 1 }), 0.4, true)
+	if !ascii.Cells[0].Faint {
+		t.Fatal("ASCII grid was not fainted")
+	}
+}

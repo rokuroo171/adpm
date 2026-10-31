@@ -25,13 +25,14 @@ adpm 0.1.0 · spec: docs/superpowers/specs/2026-10-30-adpm-design.md
 - One-line tier runs outside Bubble Tea (spec: "no TUI"); a shrink inside the TUI clamps back to compact.
 - `.gitignore` adds `/adpm` for the Makefile build output next to the spec's three entries.
 - Skip unlocks after `clamp(duration × 0.4, 2s, 5s)`; early Enter restarts the ad.
-- Ctrl+C opens the reward popup with Cancel selected; confirming it prints the manager message and exits 130.
+- Ctrl+C opens the reward popup with Continue selected; Skip aborts the pending install and exits 130.
 - Report opens its popup, and Enter restarts the ad with a fresh countdown.
 - `messages.toml` is embedded for the manager abort messages and popup copy.
 - One-line mode reads raw key input and keeps the controls inline without the alt screen.
 - `rasterm` encodes Kitty, Sixel, and iTerm2 frames; half-block uses 256 colors unless `COLORTERM` reports truecolor or 24bit.
 - The terminal probe checks Kitty graphics and DA1 replies for up to 150ms; `TERM=linux`, `dumb`, and `NO_COLOR` select ASCII.
 - Kitty images are cleared before drawing and during cleanup; graphic images are cleared while a popup is open.
+- Raster popups overlay a cached, dimmed player grid; playback and its clock stay paused until the popup closes.
 
 ## Known issues
 
