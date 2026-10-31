@@ -83,6 +83,9 @@ func ASCII(frame image.Image, cols, rows int) string {
 	}
 	const ramp = " .:-=+*#%@"
 	bounds := frame.Bounds()
+	if _, ok := frame.(*image.Uniform); ok {
+		bounds = image.Rect(0, 0, 1, 1)
+	}
 	w, h := bounds.Dx(), bounds.Dy()
 	if w < 1 || h < 1 {
 		return ""
@@ -90,9 +93,10 @@ func ASCII(frame image.Image, cols, rows int) string {
 	var out strings.Builder
 	for y := 0; y < rows; y++ {
 		for x := 0; x < cols; x++ {
-			px := bounds.Min.X + (2*x+1)*w/(2*cols)
-			py := bounds.Min.Y + (4*y+1)*h/(4*rows)
-			r, g, b, _ := frame.At(px, py).RGBA()
+			pixel := sampleRegion(frame, bounds,
+				bounds.Min.X+x*w/cols, bounds.Min.Y+y*h/rows,
+				bounds.Min.X+(x+1)*w/cols, bounds.Min.Y+(y+1)*h/rows)
+			r, g, b := uint32(pixel[0])*257, uint32(pixel[1])*257, uint32(pixel[2])*257
 			luminance := (299*r + 587*g + 114*b) / 1000
 			index := int(luminance * uint32(len(ramp)-1) / 65535)
 			out.WriteByte(ramp[index])

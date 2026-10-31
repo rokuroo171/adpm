@@ -42,7 +42,7 @@ func TestFit(t *testing.T) {
 	}
 }
 
-// The box must never exceed the terminal or the spec's 100x36 cap.
+// The fitted box must stay inside the terminal and the 100x36 cap.
 func TestFitStaysInsideBounds(t *testing.T) {
 	type tc struct{ frameW, frameH, cols, rows, cellW, cellH int }
 	cases := []tc{
@@ -166,5 +166,19 @@ func TestHalfBlockEdgeCases(t *testing.T) {
 		if got := HalfBlock(tt.f, tt.cols, tt.rows); got != "" {
 			t.Errorf("HalfBlock(nil/zero size) = %q, want empty", got)
 		}
+	}
+}
+
+func TestSampleRegionAveragesDownscaledPixels(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	for y := 0; y < 2; y++ {
+		img.SetRGBA(0, y, color.RGBA{R: 255, A: 255})
+		img.SetRGBA(1, y, color.RGBA{R: 255, A: 255})
+		img.SetRGBA(2, y, color.RGBA{B: 255, A: 255})
+		img.SetRGBA(3, y, color.RGBA{B: 255, A: 255})
+	}
+	got := sampleRegion(img, img.Bounds(), 0, 0, 4, 2)
+	if got != ([3]uint8{127, 0, 127}) {
+		t.Fatalf("sampleRegion = %v, want 127/0/127", got)
 	}
 }

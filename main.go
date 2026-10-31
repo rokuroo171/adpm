@@ -84,8 +84,8 @@ func isTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-// playAd runs the ad player. Best effort: any failure (including a panic)
-// drops the ad and the install proceeds. The error banner lands in Milestone 6.
+// playAd runs the ad player. Any failure, including a panic, drops the ad and
+// lets the install proceed.
 func playAd() (result tui.Result) {
 	defer func() { _ = recover() }()
 
@@ -93,8 +93,7 @@ func playAd() (result tui.Result) {
 	if len(frames) == 0 {
 		return tui.Result{}
 	}
-	// Ad metadata comes from ad.toml in Milestone 6; until then the dev ad
-	// uses the spec's placeholder title.
+	// Use the placeholder sponsor title for the development ad.
 	messages, err := loadMessages()
 	if err != nil {
 		return tui.Result{}
@@ -161,14 +160,14 @@ func messageLines(section map[string]string) []string {
 	return lines
 }
 
-// devFrames loads frames from ads-dev/ when ADPM_DEV=1. The real ad pool
-// (ads/, go:embed) lands in Milestone 6.
+// devFrames loads the local video's extracted frames when ADPM_DEV=1.
 func devFrames() []image.Image {
 	if os.Getenv("ADPM_DEV") != "1" {
 		return nil
 	}
 	fsys := os.DirFS("ads-dev")
-	entries, err := fs.ReadDir(fsys, "test/frames")
+	const frameDir = "test/local-ad-frames"
+	entries, err := fs.ReadDir(fsys, frameDir)
 	if err != nil {
 		return nil
 	}
@@ -182,7 +181,7 @@ func devFrames() []image.Image {
 
 	var frames []image.Image
 	for _, n := range names {
-		f, err := fsys.Open(filepath.Join("test", "frames", n))
+		f, err := fsys.Open(filepath.Join(frameDir, n))
 		if err != nil {
 			return nil
 		}

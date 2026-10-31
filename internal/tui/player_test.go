@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bufio"
 	"image"
 	"image/color"
 	"image/draw"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/rokuroo171/adpm/internal/render"
 )
 
@@ -52,7 +54,7 @@ func strippedLines(s string) []string {
 	return out
 }
 
-// The three sizes from the spec's done-when must render without garbling:
+// These terminal sizes must render without garbling:
 // nothing wider than the terminal, no replacement runes, and the right tier.
 func TestViewAtDoneWhenSizes(t *testing.T) {
 	tests := []struct {
@@ -120,8 +122,42 @@ func TestViewUsesClockHeaderAndShortFooter(t *testing.T) {
 	if !strings.Contains(view, "Ad") || !strings.Contains(view, "0:10") {
 		t.Fatalf("view missing label or remaining time: %q", view)
 	}
-	if !strings.Contains(view, "^C ?") || !strings.Contains(view, "r report") {
+	if !strings.Contains(view, "[Ctrl+C] ???") || !strings.Contains(view, "[r] report") {
 		t.Fatalf("narrow footer missing short controls: %q", view)
+	}
+	if !strings.Contains(view, "[Ctrl+C] ???") || !strings.Contains(view, "[r] report") {
+		t.Fatalf("footer missing aligned control labels: %q", view)
+	}
+}
+
+func TestFooterSpreadsControlsAcrossVideoWidth(t *testing.T) {
+	m := newTestModel(t, 90, 70)
+	m.total = 10 * time.Second
+	line := sgrRe.ReplaceAllString(footerLine(m, 0, 88), "")
+	if !strings.HasPrefix(line, "Skip in 4s") {
+		t.Fatalf("footer left label = %q", line)
+	}
+	if strings.Index(line, "[Ctrl+C] ???") < 25 || strings.Index(line, "[r] report") < 70 {
+		t.Fatalf("footer controls are not edge-aligned: %q", line)
+	}
+}
+
+func TestPlayerHasBlankRowBetweenBarAndFooter(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	lines := strippedLines(m.View())
+	bar := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && strings.Trim(trimmed, "━╸─") == "" {
+			bar = i
+			break
+		}
+	}
+	if bar < 0 || bar+2 >= len(lines) || strings.TrimSpace(lines[bar+1]) != "" {
+		t.Fatalf("expected one blank row under progress bar: %q", lines)
+	}
+	if !strings.Contains(lines[bar+2], "Skip in") {
+		t.Fatalf("footer did not follow the blank row: %q", lines)
 	}
 }
 
@@ -190,16 +226,51 @@ func TestViewUsesDetectedGraphicProtocol(t *testing.T) {
 	}
 }
 
-func TestRewardPopupClearsKittyImages(t *testing.T) {
+func TestPopupOverlaysKeepPlayerVisible(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	view := m.View()
+	if !strings.Contains(view, "Ad") || !strings.Contains(view, "0:01") {
+		t.Error("reward overlay removed the underlying player")
+	}
+	if !strings.Contains(view, "Continue") || !strings.Contains(view, "Skip") {
+		t.Error("reward overlay is missing Continue and Skip actions")
+	}
+	if !strings.Contains(view, "┌") || !strings.Contains(view, "loses your reward") {
+		t.Error("reward overlay is missing its square modal")
+	}
+}
+
+func TestOverlayLinePreservesBaseTextAndColors(t *testing.T) {
+	base := "\x1b[31mabcdefghij\x1b[0m"
+	got := overlayLine(base, "XYZ", 10)
+	plain := sgrRe.ReplaceAllString(got, "")
+	if plain != "abcXYZghij" {
+		t.Fatalf("overlayLine text = %q, want %q", plain, "abcXYZghij")
+	}
+	if !strings.Contains(got, "\x1b[31mghij") {
+		t.Fatalf("overlayLine dropped the background color from the right segment: %q", got)
+	}
+}
+
+func TestOverlayLineKeepsColorChangeAtRightEdge(t *testing.T) {
+	base := "\x1b[31mabcdef\x1b[34mghij\x1b[0m"
+	got := overlayLine(base, "XYZ", 10)
+	if !strings.Contains(got, "\x1b[31m\x1b[34mghij") {
+		t.Fatalf("overlayLine lost the right segment's color: %q", got)
+	}
+}
+
+func TestGraphicPopupRendersCurrentDimmedFrame(t *testing.T) {
 	m := newTestModel(t, 80, 24)
 	m.tier = render.TierKitty
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	view := m.View()
-	if !strings.Contains(view, "\x1b_Ga=d,d=A\x1b\\") {
-		t.Error("reward popup did not clear Kitty images")
+	if !strings.Contains(view, "\x1b_Ga=T,") {
+		t.Fatal("popup overlay did not redraw the current Kitty frame")
 	}
-	if strings.Contains(view, "\x1b_Ga=T,") {
-		t.Error("reward popup redraw contains a Kitty image")
+	if !strings.Contains(view, "Continue") {
+		t.Fatal("popup overlay is missing its modal actions")
 	}
 }
 
@@ -292,40 +363,139 @@ func TestKeys(t *testing.T) {
 	if m.result.Cancelled {
 		t.Fatal("Ctrl+C cancelled before the popup was confirmed")
 	}
-	if !strings.Contains(m.View(), "Reward line one") {
+	if !strings.Contains(m.View(), "loses your reward") {
 		t.Fatalf("Ctrl+C did not show the reward popup: %q", m.View())
 	}
 
+	started := m.start
+	paused := m.paused
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.result.Cancelled {
-		t.Error("Enter on the default Cancel button did not cancel")
+	if m.result.Cancelled {
+		t.Error("Enter on default Continue cancelled the install")
+	}
+	if m.popup != popupNone || !m.start.After(started) || m.start.Sub(started) < time.Since(paused)-time.Second {
+		t.Error("Continue did not resume the same paused ad")
 	}
 
 	m = newTestModel(t, 80, 24)
-	m.rewardLines = []string{"Reward line one", "Reward line two"}
 	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.result.Cancelled {
-		t.Error("choosing OK cancelled the install")
-	}
-	if strings.Contains(m.View(), "You won't get your reward") {
-		t.Errorf("choosing OK left the popup open")
-	}
-	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
-	if !strings.Contains(m.View(), "Reward line two") {
-		t.Errorf("reward popup did not rotate its message: %q", m.View())
+	if !m.result.Cancelled {
+		t.Error("choosing Skip did not cancel the install")
 	}
 
 	m = newTestModel(t, 80, 24)
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
-	if !strings.Contains(m.View(), "Thank you. Your report will be reviewed") {
-		t.Fatalf("r did not show the report popup: %q", m.View())
+	if !strings.Contains(m.View(), "Report this ad") || !strings.Contains(m.View(), "Why are you reporting this ad?") {
+		t.Fatalf("r did not show the report form: %q", m.View())
 	}
 	oldStart := m.start
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.start.After(oldStart) {
-		t.Error("dismissing the report did not restart the ad")
+	if m.reportSubmitted {
+		t.Error("empty report submitted")
+	}
+	m.reportText = "This ad is misleading"
+	m.reportFocus = reportFocusSubmit
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.reportSubmitted || !strings.Contains(m.View(), "Thank you") || !strings.Contains(m.View(), "business years") {
+		t.Errorf("valid report did not show parody confirmation: submitted=%v", m.reportSubmitted)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.start.After(oldStart) || m.popup != popupNone {
+		t.Error("report confirmation did not restart the ad")
+	}
+}
+
+func TestReportValidation(t *testing.T) {
+	for _, tt := range []struct {
+		text string
+		want bool
+	}{
+		{"", false}, {"         ", false}, {"short", false}, {"1234567890", true},
+	} {
+		if got := validReport(tt.text); got != tt.want {
+			t.Errorf("validReport(%q) = %v, want %v", tt.text, got, tt.want)
+		}
+	}
+}
+
+func TestReportInputLimitAndModalShortcuts(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	for i := 0; i < reportMaxLength+10; i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	}
+	if len([]rune(m.reportText)) != reportMaxLength {
+		t.Fatalf("report length = %d, want %d", len([]rune(m.reportText)), reportMaxLength)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if m.popup != popupNone || m.result.Finished {
+		t.Fatal("Escape did not dismiss the report form without submitting")
+	}
+}
+
+func TestEscapeResumesRewardWithoutResettingPlayback(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.total = 20 * time.Second
+	m.start = time.Now().Add(-7 * time.Second)
+	m.frameIx = 7
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if m.popup != popupNone || m.frameIx != 7 {
+		t.Fatalf("Escape changed ad state: popup=%v frame=%d", m.popup, m.frameIx)
+	}
+	if got := m.elapsedAt(time.Now()); got < 7*time.Second {
+		t.Fatal("Escape did not resume elapsed playback from its paused position")
+	}
+}
+
+func TestReportDialogTabCyclesInputAndActions(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if m.reportFocus != reportFocusInput {
+		t.Fatal("report input did not receive focus on open")
+	}
+	for _, want := range []int{reportFocusSubmit, reportFocusCancel, reportFocusInput} {
+		m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		if m.reportFocus != want {
+			t.Fatalf("report focus = %d, want %d", m.reportFocus, want)
+		}
+	}
+}
+
+func TestDimFrameHalvesColors(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.SetRGBA(0, 0, color.RGBA{R: 200, G: 100, B: 40, A: 255})
+	dim := dimFrame(img)
+	got := color.RGBAModel.Convert(dim.At(0, 0)).(color.RGBA)
+	if got != (color.RGBA{R: 100, G: 50, B: 20, A: 255}) {
+		t.Fatalf("dimmed color = %v, want 100/50/20", got)
+	}
+}
+
+func TestInputReadyReadsBufferedAndPolledBytes(t *testing.T) {
+	input, output, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer output.Close()
+	reader := bufio.NewReader(input)
+	if inputReady(reader, int(input.Fd()), 0) {
+		t.Fatal("empty input was reported as ready")
+	}
+	if _, err := output.Write([]byte("ab")); err != nil {
+		t.Fatal(err)
+	}
+	if !inputReady(reader, int(input.Fd()), 100) {
+		t.Fatal("pipe input was not reported as ready")
+	}
+	if _, err := reader.ReadByte(); err != nil {
+		t.Fatal(err)
+	}
+	if !inputReady(reader, int(input.Fd()), 0) {
+		t.Fatal("buffered input was not reported as ready")
 	}
 }
 
@@ -376,6 +546,23 @@ func TestRewardPopupFitsCompactTerminals(t *testing.T) {
 			if width := len([]rune(line)); width > size[0] {
 				t.Errorf("%dx%d line %d has width %d: %q", size[0], size[1], i, width, line)
 			}
+		}
+	}
+}
+
+func TestReportPopupFitsCompactTerminal(t *testing.T) {
+	m := newTestModel(t, 20, 6)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	lines := strippedLines(m.View())
+	if len(lines) > 6 {
+		t.Fatalf("report popup has %d lines in 6-row terminal", len(lines))
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "Report this ad") || !strings.Contains(strings.Join(lines, "\n"), "0/300") {
+		t.Fatalf("compact report popup missing form fields: %q", lines)
+	}
+	for i, line := range lines {
+		if width := lipgloss.Width(line); width > 20 {
+			t.Errorf("line %d has width %d in 20-column terminal: %q", i, width, line)
 		}
 	}
 }

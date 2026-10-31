@@ -21,7 +21,7 @@ import (
 	"golang.org/x/term"
 )
 
-// frameInterval gives the spec's ~10 fps playback.
+// frameInterval sets playback to 10 fps.
 const frameInterval = 100 * time.Millisecond
 
 // Options describe the ad to play.
@@ -36,7 +36,7 @@ type Options struct {
 type Result struct {
 	Duration  time.Duration
 	Finished  bool // watched to the end
-	Cancelled bool // user exited early (popup flow lands in Milestone 3)
+	Cancelled bool // user exited early
 	Suspended bool // Ctrl+Z: terminal restored, process re-stopped
 }
 
@@ -255,16 +255,18 @@ func playOneLine(opts Options, cols int, total time.Duration) (Result, error) {
 
 func oneLineView(m *model, cols int, now time.Time) string {
 	if m.popup == popupReward {
-		line := "You won't get your reward. Enter: Cancel, Tab: OK"
-		if len(m.rewardLines) > 0 {
-			line = m.rewardLines[(m.rewardIndex-1)%len(m.rewardLines)] + " Enter: Cancel, Tab: OK"
+		continueLabel, skipLabel := "Continue", "Skip"
+		if m.choice == 0 {
+			continueLabel = "[Continue]"
+		} else {
+			skipLabel = "[Skip]"
 		}
-		if m.choice == 1 {
-			line = strings.Replace(line, "Enter: Cancel, Tab: OK", "Tab: Cancel, Enter: OK", 1)
-		}
-		return render.Truncate(line, cols)
+		return render.Truncate("Skip loses reward and cancels install. "+continueLabel+" "+skipLabel, cols)
 	}
 	if m.popup == popupReport {
+		if !m.reportSubmitted {
+			return render.Truncate("Report: "+m.reportText+" "+oneLineReportActions(m), cols)
+		}
 		message := m.reportMessage
 		if message == "" {
 			message = "Thank you. Your report will be reviewed in 3-5 business years."
@@ -312,25 +314,60 @@ func lineInput() (<-chan tea.KeyMsg, func()) {
 				key = tea.KeyMsg{Type: tea.KeyEnter}
 			case '\t':
 				key = tea.KeyMsg{Type: tea.KeyTab}
+			case 8, 127:
+				key = tea.KeyMsg{Type: tea.KeyBackspace}
 			case 'r':
 				key = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}}
 			case 27:
-				sequence := make([]byte, 2)
-				if _, err := io.ReadFull(reader, sequence); err != nil || sequence[0] != '[' {
-					continue
+				if !inputReady(reader, fd, 25) {
+					key = tea.KeyMsg{Type: tea.KeyEscape}
+					break
 				}
-				if sequence[1] == 'D' {
+				first, err := reader.ReadByte()
+				if err != nil || first != '[' || !inputReady(reader, fd, 25) {
+					key = tea.KeyMsg{Type: tea.KeyEscape}
+					break
+				}
+				direction, err := reader.ReadByte()
+				if err != nil {
+					key = tea.KeyMsg{Type: tea.KeyEscape}
+				} else if direction == 'D' {
 					key = tea.KeyMsg{Type: tea.KeyLeft}
-				} else if sequence[1] == 'C' {
+				} else if direction == 'C' {
 					key = tea.KeyMsg{Type: tea.KeyRight}
+				} else {
+					key = tea.KeyMsg{Type: tea.KeyEscape}
 				}
 			default:
-				continue
+				if b < 32 || b > 126 {
+					continue
+				}
+				key = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(b)}}
 			}
 			keys <- key
 		}
 	}()
 	return keys, func() { _ = term.Restore(fd, state) }
+}
+
+func inputReady(reader *bufio.Reader, fd, timeoutMS int) bool {
+	if reader.Buffered() > 0 {
+		return true
+	}
+	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, timeoutMS)
+	return err == nil && n > 0 && fds[0].Revents&unix.POLLIN != 0
+}
+
+func oneLineReportActions(m *model) string {
+	submit, cancel := "Submit", "Cancel"
+	if m.reportFocus == reportFocusSubmit {
+		submit = "[Submit]"
+	}
+	if m.reportFocus == reportFocusCancel {
+		cancel = "[Cancel]"
+	}
+	return submit + " " + cancel
 }
 
 // winSize reads the terminal geometry. Cell pixel size falls back to 1:2

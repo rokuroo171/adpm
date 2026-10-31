@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-// Max ad box dimensions, per spec: centered with letterbox beyond these.
+// Max ad box dimensions for centered, letterboxed rendering.
 const (
 	maxBoxCols = 100
 	maxBoxRows = 36

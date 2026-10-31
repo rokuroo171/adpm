@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// wrapped lists the managers adpm wraps, per the spec's fixed decisions.
+// wrapped lists the package managers adpm can invoke.
 var wrapped = map[string]struct{}{
 	"pacman": {}, "yay": {}, "paru": {},
 	"apt": {}, "dnf": {}, "brew": {}, "flatpak": {},
