@@ -190,7 +190,7 @@ func playAd() (result tui.Result) {
 	if len(frames) == 0 {
 		return tui.Result{}
 	}
-	// The development ad uses a placeholder title until ad metadata is loaded.
+	// Use the placeholder sponsor title for the development ad.
 	messages, err := loadMessages()
 	if err != nil {
 		return tui.Result{}
@@ -257,13 +257,14 @@ func messageLines(section map[string]string) []string {
 	return lines
 }
 
-// devFrames loads frames from ads-dev/ only when ADPM_DEV=1.
+// devFrames loads the local video's extracted frames when ADPM_DEV=1.
 func devFrames() []image.Image {
 	if os.Getenv("ADPM_DEV") != "1" {
 		return nil
 	}
 	fsys := os.DirFS("ads-dev")
-	entries, err := fs.ReadDir(fsys, "test/frames")
+	const frameDir = "test/local-ad-frames"
+	entries, err := fs.ReadDir(fsys, frameDir)
 	if err != nil {
 		return nil
 	}
@@ -277,7 +278,7 @@ func devFrames() []image.Image {
 
 	var frames []image.Image
 	for _, n := range names {
-		f, err := fsys.Open(filepath.Join("test", "frames", n))
+		f, err := fsys.Open(filepath.Join(frameDir, n))
 		if err != nil {
 			return nil
 		}

@@ -7,7 +7,7 @@ import (
 	"math"
 )
 
-// Max ad box dimensions, per spec: centered with letterbox beyond these.
+// Max ad box dimensions for centered, letterboxed rendering.
 const (
 	maxBoxCols = 100
 	maxBoxRows = 36
@@ -40,8 +40,7 @@ func ModeFor(cols, rows int) Mode {
 // Fit computes the ad box size in cells for a frame of frameW x frameH
 // pixels inside a cols x rows terminal whose cells are cellW x cellH pixels.
 // Both dimensions are fitted preserving the frame's aspect ratio, the box is
-// capped at maxBoxCols x maxBoxRows, the image is never scaled past its
-// native size, and every result is clamped to at least 1.
+// capped at maxBoxCols x maxBoxRows, and every result is clamped to at least 1.
 func Fit(frameW, frameH, cols, rows, cellW, cellH int) (int, int) {
 	// Terminals that report no pixel size fall back to a 1:2 cell aspect.
 	if cellW <= 0 || cellH <= 0 {
@@ -66,9 +65,6 @@ func Fit(frameW, frameH, cols, rows, cellW, cellH int) (int, int) {
 		float64(maxCols*cellW)/float64(frameW),
 		float64(maxRows*cellH)/float64(frameH),
 	)
-	if scale > 1 {
-		scale = 1 // never upscale past the baked frame size
-	}
 	boxCols := int(math.Ceil(float64(frameW) * scale / float64(cellW)))
 	boxRows := int(math.Ceil(float64(frameH) * scale / float64(cellH)))
 	return clamp(boxCols, 1, maxCols), clamp(boxRows, 1, maxRows)
