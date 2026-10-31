@@ -19,16 +19,22 @@ import (
 	"syscall"
 
 	"github.com/rokuroo171/adpm/internal/pm"
+	"github.com/rokuroo171/adpm/internal/shell"
 	"github.com/rokuroo171/adpm/internal/tui"
+	"github.com/rokuroo171/adpm/internal/typo"
 	"golang.org/x/term"
 )
 
 //go:embed messages.toml
 var messageFS embed.FS
 
-const usage = `usage: adpm <pm> <args...>
+const usage = `usage:
+  adpm <pm> <args...>
+  adpm --typo <name> [args...]
+  adpm --ad-only <pm> <args...>
+  adpm init bash|zsh|fish
 
-Wrap a package manager and play an ad before install-ish invocations.`
+Wrap package managers and play an ad before install-ish invocations.`
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -38,6 +44,14 @@ func run(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2
+	}
+	switch args[0] {
+	case "init":
+		return runInit(args[1:])
+	case "--typo":
+		return runTypo(args[1:])
+	case "--ad-only":
+		return runAdOnly(args[1:])
 	}
 	name, rest := args[0], args[1:]
 
@@ -51,6 +65,89 @@ func run(args []string) int {
 		}
 	}
 	return execReal(name, rest)
+}
+
+func runInit(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	snippet, err := shell.Snippet(args[0])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	fmt.Fprint(os.Stdout, snippet)
+	return 0
+}
+
+func runAdOnly(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	name, rest := args[0], args[1:]
+	if os.Getenv("ADPM_DISABLE") == "1" || !isTTY() || !pm.IsInstallish(name, rest) {
+		return 0
+	}
+	if playAd().Cancelled {
+		return cancelInstall(name)
+	}
+	return 0
+}
+
+func runTypo(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	command := args[0]
+	matched := false
+	if os.Getenv("ADPM_MERCY") != "1" && os.Getenv("ADPM_DISABLE") != "1" && isTTY() {
+		_, matched = typo.Match(command)
+	}
+	if matched {
+		playTypoAd()
+		fmt.Fprintln(os.Stderr, commandNotFoundText(currentShell(), command, true))
+		return 127
+	}
+	fmt.Fprintln(os.Stderr, commandNotFoundText(currentShell(), command, false))
+	return 127
+}
+
+func commandNotFoundText(shellName, command string, sponsored bool) string {
+	if sponsored {
+		return fmt.Sprintf("%s: %s: command not found. (Sponsored by adpm.)", shellName, command)
+	}
+	switch shellName {
+	case "zsh":
+		return fmt.Sprintf("zsh: command not found: %s", command)
+	case "fish":
+		return fmt.Sprintf("fish: Unknown command: %s", command)
+	default:
+		return fmt.Sprintf("bash: %s: command not found", command)
+	}
+}
+
+func currentShell() string {
+	name := os.Getenv("ADPM_SHELL")
+	if name == "" {
+		name = filepath.Base(os.Getenv("SHELL"))
+	}
+	switch name {
+	case "bash", "zsh", "fish":
+		return name
+	default:
+		return "bash"
+	}
+}
+
+func playTypoAd() {
+	frames := devFrames()
+	if len(frames) == 0 {
+		return
+	}
+	_, _ = tui.Play(tui.Options{Frames: frames, Title: "Synergy™", Typo: true})
 }
 
 func cancelInstall(name string) int {
@@ -84,8 +181,8 @@ func isTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
 }
 
-// playAd runs the ad player. Best effort: any failure (including a panic)
-// drops the ad and the install proceeds. The error banner lands in Milestone 6.
+// playAd runs the ad player. Any failure, including a panic, drops the ad and
+// lets the install proceed.
 func playAd() (result tui.Result) {
 	defer func() { _ = recover() }()
 
@@ -93,8 +190,7 @@ func playAd() (result tui.Result) {
 	if len(frames) == 0 {
 		return tui.Result{}
 	}
-	// Ad metadata comes from ad.toml in Milestone 6; until then the dev ad
-	// uses the spec's placeholder title.
+	// The development ad uses a placeholder title until ad metadata is loaded.
 	messages, err := loadMessages()
 	if err != nil {
 		return tui.Result{}
@@ -161,8 +257,7 @@ func messageLines(section map[string]string) []string {
 	return lines
 }
 
-// devFrames loads frames from ads-dev/ when ADPM_DEV=1. The real ad pool
-// (ads/, go:embed) lands in Milestone 6.
+// devFrames loads frames from ads-dev/ only when ADPM_DEV=1.
 func devFrames() []image.Image {
 	if os.Getenv("ADPM_DEV") != "1" {
 		return nil

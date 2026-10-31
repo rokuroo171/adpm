@@ -35,6 +35,7 @@ type model struct {
 	reportMessage string
 	rewardIndex   int
 	result        Result
+	typo          bool
 }
 
 type popupKind uint8
@@ -74,7 +75,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		ix := int(elapsed / frameInterval)
-		if ix >= len(m.frames) {
+		if m.typo {
+			ix %= len(m.frames)
+		} else if ix >= len(m.frames) {
 			ix = len(m.frames) - 1
 		}
 		m.frameIx = ix
@@ -86,6 +89,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.typo {
+			if msg.String() == "ctrl+c" {
+				m.message = "Nice try."
+				m.messageUntil = time.Now().Add(2 * time.Second)
+			}
+			return m, nil
+		}
 		if m.popup != popupNone {
 			return m.updatePopup(msg)
 		}
@@ -168,7 +178,9 @@ func (m *model) View() string {
 	var content string
 	if m.mode == render.ModeCompact {
 		line := fmt.Sprintf("AD · %s · %ds · Skip: Enter", m.title, secs)
-		if time.Since(m.start) < skipAfter(m.total) {
+		if m.typo {
+			line = fmt.Sprintf("AD · %s · %ds · lockout", m.title, secs)
+		} else if time.Since(m.start) < skipAfter(m.total) {
 			line = fmt.Sprintf("AD · %s · %ds · Skip in %d", m.title, secs,
 				int(math.Ceil((skipAfter(m.total) - time.Since(m.start)).Seconds())))
 		}
@@ -179,7 +191,9 @@ func (m *model) View() string {
 			m.cols, max(m.rows-3, 1), m.cellW, m.cellH)
 		img := render.HalfBlock(m.frames[m.frameIx], boxCols, boxRows)
 		controlsText := "[Enter] skip · [Ctrl+C] reward · [r] report"
-		if time.Since(m.start) < skipAfter(m.total) {
+		if m.typo {
+			controlsText = "Unskippable ad"
+		} else if time.Since(m.start) < skipAfter(m.total) {
 			wait := int(math.Ceil((skipAfter(m.total) - time.Since(m.start)).Seconds()))
 			controlsText = fmt.Sprintf("[Enter] Skip in %ds · [Ctrl+C] reward · [r] report", wait)
 		}

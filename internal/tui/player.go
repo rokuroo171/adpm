@@ -21,8 +21,9 @@ import (
 	"golang.org/x/term"
 )
 
-// frameInterval gives the spec's ~10 fps playback.
+// frameInterval sets playback to ten frames per second.
 const frameInterval = 100 * time.Millisecond
+const typoDuration = 30 * time.Second
 
 // Options describe the ad to play.
 type Options struct {
@@ -30,13 +31,14 @@ type Options struct {
 	Title         string
 	RewardLines   []string
 	ReportMessage string
+	Typo          bool
 }
 
 // Result reports how the ad ended.
 type Result struct {
 	Duration  time.Duration
 	Finished  bool // watched to the end
-	Cancelled bool // user exited early (popup flow lands in Milestone 3)
+	Cancelled bool // user exited early through the cancellation popup
 	Suspended bool // Ctrl+Z: terminal restored, process re-stopped
 }
 
@@ -47,7 +49,7 @@ func Play(opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	if res.Finished {
+	if res.Finished && !opts.Typo {
 		fmt.Fprintf(os.Stdout, "[adpm] ad watched (%ds). Thank you for your support.\n",
 			int(res.Duration.Seconds()))
 	}
@@ -91,7 +93,7 @@ func play(opts Options) (Result, error) {
 	if len(opts.Frames) == 0 {
 		return Result{}, errors.New("adpm: no frames to play")
 	}
-	total := time.Duration(len(opts.Frames)) * frameInterval
+	total := playbackDuration(len(opts.Frames), opts.Typo)
 	cols, rows, cellW, cellH := winSize()
 
 	if render.ModeFor(cols, rows) == render.ModeOneLine {
@@ -100,12 +102,20 @@ func play(opts Options) (Result, error) {
 	return playTUI(opts, total, cols, rows, cellW, cellH)
 }
 
+func playbackDuration(frameCount int, typo bool) time.Duration {
+	if typo {
+		return typoDuration
+	}
+	return time.Duration(frameCount) * frameInterval
+}
+
 func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int) (Result, error) {
 	m := &model{
 		frames:        opts.Frames,
 		title:         opts.Title,
 		rewardLines:   opts.RewardLines,
 		reportMessage: opts.ReportMessage,
+		typo:          opts.Typo,
 		total:         total,
 		start:         time.Now(),
 		cols:          cols,
@@ -139,7 +149,7 @@ func playTUI(opts Options, total time.Duration, cols, rows, cellW, cellH int) (R
 func playOneLine(opts Options, cols int, total time.Duration) (Result, error) {
 	m := &model{
 		title: opts.Title, total: total, start: time.Now(),
-		rewardLines: opts.RewardLines, reportMessage: opts.ReportMessage,
+		rewardLines: opts.RewardLines, reportMessage: opts.ReportMessage, typo: opts.Typo,
 	}
 	keys, restoreInput := lineInput()
 	defer restoreInput()
@@ -201,6 +211,14 @@ func oneLineView(m *model, cols int, now time.Time) string {
 			message = "Thank you. Your report will be reviewed in 3-5 business years."
 		}
 		return render.Truncate(message+" Enter: restart", cols)
+	}
+	if m.typo {
+		if m.message != "" {
+			return render.Truncate(m.message, cols)
+		}
+		remaining := m.total - now.Sub(m.start)
+		return render.Truncate(fmt.Sprintf("AD · %s · %ds · lockout", m.title,
+			int(math.Ceil(remaining.Seconds()))), cols)
 	}
 	remaining := m.total - now.Sub(m.start)
 	secs := int(math.Ceil(remaining.Seconds()))
