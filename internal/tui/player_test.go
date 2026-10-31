@@ -62,8 +62,8 @@ func TestViewAtDoneWhenSizes(t *testing.T) {
 		wantTier   render.Mode
 		wantMarker string
 	}{
-		{80, 24, render.ModeFull, "▀"},
-		{40, 20, render.ModeFull, "▀"},
+		{80, 24, render.ModeFull, "48;2;180;90;40"},
+		{40, 20, render.ModeFull, "48;2;180;90;40"},
 		{20, 6, render.ModeCompact, "Ad"},
 	}
 	for _, tt := range tests {
@@ -405,6 +405,49 @@ func TestTickAdvancesFrames(t *testing.T) {
 	}
 	if m.result.Finished {
 		t.Error("Finished = true before total elapsed")
+	}
+}
+
+func TestTypoModeCyclesFramesAndIgnoresControls(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.typo = true
+	m.total = 30 * time.Second
+	m.start = time.Now().Add(-11 * frameInterval)
+
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.result.Finished || m.frameIx != 0 {
+		t.Fatal("Enter changed the typo playback state")
+	}
+	m.Update(tickMsg(time.Now()))
+	if m.frameIx != 1 {
+		t.Fatalf("frameIx = %d, want 1 after cycling a 10-frame ad", m.frameIx)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if m.popup != popupNone || m.result.Finished || m.result.Cancelled {
+		t.Fatal("Ctrl+C opened a popup or ended typo playback")
+	}
+	if m.message != "Nice try." {
+		t.Fatalf("message = %q, want Nice try.", m.message)
+	}
+}
+
+func TestTypoModeViewDoesNotOfferSkip(t *testing.T) {
+	m := newTestModel(t, 80, 24)
+	m.typo = true
+	m.total = 30 * time.Second
+
+	view := m.View()
+	if strings.Contains(view, "Skip") || strings.Contains(view, "Enter") {
+		t.Fatalf("typo view offers a skip control: %q", view)
+	}
+}
+
+func TestPlaybackDurationUsesThirtySecondTypoLockout(t *testing.T) {
+	if got := playbackDuration(30, true); got != 30*time.Second {
+		t.Fatalf("typo playback duration = %v, want %v", got, 30*time.Second)
+	}
+	if got := playbackDuration(30, false); got != 30*frameInterval {
+		t.Fatalf("normal playback duration = %v, want %v", got, 30*frameInterval)
 	}
 }
 

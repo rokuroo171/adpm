@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// wrapped lists the package managers adpm can invoke.
+// wrapped lists the managers whose command syntax adpm recognizes.
 var wrapped = map[string]struct{}{
 	"pacman": {}, "yay": {}, "paru": {},
 	"apt": {}, "dnf": {}, "brew": {}, "flatpak": {},
@@ -24,7 +24,7 @@ func IsInstallish(name string, args []string) bool {
 	}
 	switch name {
 	case "pacman", "yay", "paru":
-		return pacmanInstallish(args)
+		return isArchFamilyInstallish(args)
 	case "apt", "dnf", "brew":
 		return subcommandIn(args, "install", "reinstall")
 	case "flatpak":
@@ -33,10 +33,8 @@ func IsInstallish(name string, args []string) bool {
 	return false
 }
 
-// pacmanInstallish implements the -S/-U rule: the operation letter must be S
-// or U and must not carry a query modifier (s, i, l, g, p). -Q* and -R* never
-// trigger.
-func pacmanInstallish(args []string) bool {
+// The Arch-family managers share pacman's -S/-U operation flags.
+func isArchFamilyInstallish(args []string) bool {
 	for _, a := range args {
 		if a == "--" {
 			return false

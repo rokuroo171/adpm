@@ -187,3 +187,63 @@ func TestEmbeddedMessagesProvideControlsAndAbortText(t *testing.T) {
 		t.Fatal("embedded messages are missing the report reply")
 	}
 }
+
+func TestRunInitPrintsShellSnippet(t *testing.T) {
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	code := run([]string{"init", "fish"})
+	writer.Close()
+	os.Stdout = original
+	output, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || !strings.Contains(string(output), "fish_command_not_found") {
+		t.Fatalf("run(init fish) = (%d, %q), want fish snippet and exit 0", code, output)
+	}
+}
+
+func TestCommandNotFoundText(t *testing.T) {
+	tests := []struct {
+		shell    string
+		command  string
+		sponsor  bool
+		wantText string
+	}{
+		{"bash", "pamcan", true, "bash: pamcan: command not found. (Sponsored by adpm.)"},
+		{"bash", "unknown", false, "bash: unknown: command not found"},
+	}
+	for _, tt := range tests {
+		if got := commandNotFoundText(tt.shell, tt.command, tt.sponsor); got != tt.wantText {
+			t.Errorf("commandNotFoundText(%q, %q, %t) = %q, want %q", tt.shell, tt.command, tt.sponsor, got, tt.wantText)
+		}
+	}
+}
+
+func TestMercyUsesNormalCommandNotFound(t *testing.T) {
+	t.Setenv("ADPM_MERCY", "1")
+	t.Setenv("ADPM_SHELL", "zsh")
+
+	original := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	code := run([]string{"--typo", "pamcan"})
+	writer.Close()
+	os.Stderr = original
+	output, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 127 || strings.TrimSpace(string(output)) != "zsh: command not found: pamcan" {
+		t.Fatalf("run(--typo pamcan) = (%d, %q), want ordinary zsh command-not-found", code, output)
+	}
+}

@@ -42,6 +42,7 @@ type model struct {
 	reportMessage     string
 	rewardIndex       int
 	result            Result
+	typo              bool
 	graphicValid      bool
 	graphicFrame      int
 	graphicTier       render.Tier
@@ -124,7 +125,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		ix := int(elapsed / frameInterval)
-		if ix >= len(m.frames) {
+		if m.typo {
+			ix %= len(m.frames)
+		} else if ix >= len(m.frames) {
 			ix = len(m.frames) - 1
 		}
 		m.frameIx = ix
@@ -140,11 +143,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.cols, m.rows = msg.Width, msg.Height
 		m.resize()
+		m.rasterValid = false
 		m.popupBaseValid = false
 		m.popupGraphicClear = false
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.typo {
+			if msg.String() == "ctrl+c" {
+				m.message = "Nice try."
+				m.messageUntil = time.Now().Add(2 * time.Second)
+			}
+			return m, nil
+		}
 		if m.popup != popupNone {
 			return m.updatePopup(msg)
 		}
@@ -316,6 +327,9 @@ func (m *model) View() string {
 	if m.mode == render.ModeCompact {
 		width := max(min(m.cols-2, 100), 1)
 		footer := footerLine(m, elapsed, width)
+		if m.typo {
+			footer = fmt.Sprintf("AD · %s · %ds · lockout", m.title, int(math.Ceil(remaining.Seconds())))
+		}
 		if m.message != "" {
 			footer = render.Truncate(m.message, width)
 		}
@@ -349,19 +363,18 @@ func (m *model) View() string {
 		default:
 			img = m.renderRaster(displayFrame, boxCols, boxRows)
 		}
-		if m.message != "" {
-			content = strings.Join([]string{
-				headerLine(boxCols, remaining, m.popup != popupNone), img,
-				progressBar(elapsed, m.total, boxCols, m.tier == render.TierASCII), "",
-				render.Truncate(m.message, boxCols),
-			}, "\n")
-		} else {
-			content = strings.Join([]string{
-				headerLine(boxCols, remaining, m.popup != popupNone), img,
-				progressBar(elapsed, m.total, boxCols, m.tier == render.TierASCII), "",
-				footerLine(m, elapsed, boxCols),
-			}, "\n")
+		footer := footerLine(m, elapsed, boxCols)
+		if m.typo {
+			footer = "Unskippable ad"
 		}
+		if m.message != "" {
+			footer = render.Truncate(m.message, boxCols)
+		}
+		content = strings.Join([]string{
+			headerLine(boxCols, remaining, m.popup != popupNone), img,
+			progressBar(elapsed, m.total, boxCols, m.tier == render.TierASCII), "",
+			footer,
+		}, "\n")
 	}
 	contentHeight := lipgloss.Height(content)
 	top := max(m.rows/3-contentHeight/2, 0)
