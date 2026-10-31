@@ -8,7 +8,9 @@ func TestMatchUsesDamerauLevenshteinDistance(t *testing.T) {
 		want  string
 		ok    bool
 	}{
-		{input: "pacman", want: "pacman", ok: true},
+		{input: "apt", ok: false},
+		{input: "pacman", ok: false},
+		{input: "atp", want: "apt", ok: true},
 		{input: "pamcan", want: "pacman", ok: true},
 		{input: "pakman", want: "pacman", ok: true},
 		{input: "yaa", want: "yay", ok: true},

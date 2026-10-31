@@ -87,7 +87,17 @@ func runAdOnly(args []string) int {
 		return 2
 	}
 	name, rest := args[0], args[1:]
-	if os.Getenv("ADPM_DISABLE") == "1" || !isTTY() || !pm.IsInstallish(name, rest) {
+	if os.Getenv("ADPM_DISABLE") == "1" || !isTTY() {
+		return 0
+	}
+	if os.Getenv("ADPM_MERCY") != "1" {
+		if _, matched := typo.Match(name); matched {
+			playTypoAd()
+			fmt.Fprintln(os.Stderr, commandNotFoundText(currentShell(), name, true))
+			return 127
+		}
+	}
+	if !pm.IsInstallish(name, rest) {
 		return 0
 	}
 	if playAd().Cancelled {

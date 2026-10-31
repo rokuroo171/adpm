@@ -18,7 +18,7 @@ sudo() {
   if (( $# > 0 )) && command -v adpm >/dev/null 2>&1; then
     command adpm --ad-only "$@"
     local result=$?
-    if (( result == 130 )); then
+    if (( result == 130 || result == 127 )); then
       return "$result"
     fi
   fi

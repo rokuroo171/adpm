@@ -11,6 +11,9 @@ func Match(input string) (string, bool) {
 	}
 	best, bestDistance := "", 3
 	for _, candidate := range known {
+		if input == candidate {
+			return "", false
+		}
 		if abs(len([]rune(input))-len([]rune(candidate))) > 2 {
 			continue
 		}

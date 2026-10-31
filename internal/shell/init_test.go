@@ -10,10 +10,11 @@ func TestSnippetIncludesHooksAliasesAndSudoWrapper(t *testing.T) {
 		name  string
 		hook  string
 		guard string
+		stop  string
 	}{
-		{name: "bash", hook: "command_not_found_handle", guard: "command -v adpm"},
-		{name: "zsh", hook: "command_not_found_handler", guard: "command -v adpm"},
-		{name: "fish", hook: "fish_command_not_found", guard: "type -q adpm"},
+		{name: "bash", hook: "command_not_found_handle", guard: "command -v adpm", stop: "result == 127"},
+		{name: "zsh", hook: "command_not_found_handler", guard: "command -v adpm", stop: "result == 127"},
+		{name: "fish", hook: "fish_command_not_found", guard: "type -q adpm", stop: "test $result -eq 127"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -25,6 +26,9 @@ func TestSnippetIncludesHooksAliasesAndSudoWrapper(t *testing.T) {
 				if !strings.Contains(got, want) {
 					t.Errorf("Snippet(%q) does not contain %q", tt.name, want)
 				}
+			}
+			if !strings.Contains(got, tt.stop) {
+				t.Errorf("Snippet(%q) does not stop sudo after a typo is handled", tt.name)
 			}
 			for _, manager := range []string{"pacman", "yay", "paru", "apt", "dnf", "brew", "flatpak"} {
 				if !strings.Contains(got, "adpm "+manager) {

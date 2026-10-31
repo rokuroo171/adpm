@@ -21,6 +21,8 @@ function sudo
         set result $status
         if test $result -eq 130
             return $result
+        else if test $result -eq 127
+            return $result
         end
     end
     command sudo $argv
